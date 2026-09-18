@@ -1,0 +1,8 @@
+services:
+  bazaar:
+    build: .
+    init: true
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    # Run the client with `docker compose exec` to share server localhost.

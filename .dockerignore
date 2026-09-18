@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!requirements.txt
+!bazaar-protobuf-starter-linux/
+!bazaar-protobuf-starter-linux/spaceport-validate-linux-arm64
+!bazaar-protobuf-starter-linux/spaceport-validate-linux-x86_64

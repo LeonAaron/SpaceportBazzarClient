@@ -1,0 +1,6 @@
+/validation-credentials.json
+/validation-report.json
+/bazaar_pb2.py
+__pycache__/
+*.py[cod]
+.venv/
