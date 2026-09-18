@@ -1,0 +1,10 @@
+[run]
+source = bazaar_client
+omit =
+    bazaar_pb2.py
+
+[report]
+exclude_also =
+    if TYPE_CHECKING:
+    raise NotImplementedError
+show_missing = True

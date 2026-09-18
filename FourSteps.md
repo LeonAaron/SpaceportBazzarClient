@@ -1,0 +1,4 @@
+Wire & Domain Foundation — codegen + domain types + mappers + wire codec. Checked with pure round-trip unit tests, no server needed.
+Connection, Readiness Handshake, and One Live Command — WebSocket connection, auth/subprotocol, ready/readiness handshake, one advertise command. Checked live against the practice server, matching README steps 1–2 exactly.
+World Model & Full Scripted Exchange — snapshot/commitment tracking plus a hardcoded driver that replays the README's exact 10-step sequence. Checked against validation-report.json matching the documented final state exactly.
+Autonomous Decision Policy & Full Test Suite — the actual trading algorithm (reserves, advertising, targeting, pricing, accept, altruism), replacing the scripted driver. Checked via the full synthetic-snapshot unit/survival test suite with ≥90% coverage, with a note that the scripted practice server can't validate autonomous behavior (it'll report a scenario mismatch, expected).

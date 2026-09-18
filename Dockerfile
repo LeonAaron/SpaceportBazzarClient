@@ -5,8 +5,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY requirements.txt requirements-dev.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
 
 # The supplied binaries lack execute permission. Install outside the source mount.
 COPY bazaar-protobuf-starter-linux/spaceport-validate-linux-* /tmp/bazaar-bin/
