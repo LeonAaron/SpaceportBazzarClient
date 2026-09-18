@@ -118,7 +118,9 @@ def test_sync_has_no_body_and_no_request_id():
     assert revived.WhichOneof("message") == "sync"
     assert revived.sync.type == bazaar_pb2.SYNC_TYPE_SYNC
     assert revived.sync.run_id == RUN
-    assert not revived.sync.HasField("protocol_version") or revived.sync.protocol_version == "2.0"
+    assert revived.sync.protocol_version == "2.0"
+    assert not hasattr(revived.sync, "request_id")
+    assert not hasattr(revived.sync, "body")
 
 
 def test_ready_carries_the_snapshot_sequence_it_acknowledges():

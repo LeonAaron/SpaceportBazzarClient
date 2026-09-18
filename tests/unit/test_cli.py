@@ -212,13 +212,44 @@ def test_main_returns_one_when_the_session_fails(monkeypatch):
 
     monkeypatch.setattr("bazaar_client.cli.BazaarSession", explode)
 
-    assert main(["--token", TOKEN]) == 1
+    assert main(["--token", TOKEN, "--mode", "handshake"]) == 1
 
 
 def test_main_returns_zero_on_success(monkeypatch):
     install_session(monkeypatch, happy_session())
 
-    assert main(["--token", TOKEN]) == 0
+    assert main(["--token", TOKEN, "--mode", "handshake"]) == 0
+
+
+def test_trade_is_the_default_mode(monkeypatch):
+    """The client's normal job is trading, not the step-2 demo."""
+    from bazaar_client.config import config_from_args
+
+    assert config_from_args(["--token", TOKEN]).mode == "trade"
+
+
+def test_each_mode_dispatches_to_its_own_entrypoint(monkeypatch):
+    called = []
+
+    async def fake_trade(config):
+        called.append("trade")
+        return 0
+
+    async def fake_walkthrough(config):
+        called.append("walkthrough")
+        return 0
+
+    monkeypatch.setattr("bazaar_client.cli.run_trade_mode", fake_trade)
+    monkeypatch.setattr("bazaar_client.cli.run_walkthrough_mode", fake_walkthrough)
+
+    assert main(["--token", TOKEN, "--mode", "trade"]) == 0
+    assert main(["--token", TOKEN, "--mode", "walkthrough"]) == 0
+    assert called == ["trade", "walkthrough"]
+
+
+def test_an_unknown_mode_is_rejected_by_the_parser():
+    with pytest.raises(SystemExit):
+        main(["--token", TOKEN, "--mode", "nonsense"])
 
 
 # --- reporting does not leak ---------------------------------------------

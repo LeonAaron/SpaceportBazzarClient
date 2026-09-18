@@ -159,6 +159,28 @@ async def run(config: ClientConfig) -> int:
         return 0
 
 
+async def run_trade_mode(config: ClientConfig) -> int:
+    from bazaar_client.autonomous import run_trading
+
+    stats = await run_trading(config, config.evidence_file, config.max_decisions)
+    if stats.final_snapshot is None:
+        logger.error("no state was ever received")
+        return 1
+    return 0
+
+
+async def run_walkthrough_mode(config: ClientConfig) -> int:
+    from bazaar_client.scripted_walkthrough import run_walkthrough
+
+    result = await run_walkthrough(config, config.evidence_file)
+    for check in result.failures:
+        logger.error("[%s] %s: %s", check.step, check.description, check.detail)
+    logger.info(
+        "%d of %d checks passed", len(result.checks) - len(result.failures), len(result.checks)
+    )
+    return 0 if result.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         config = config_from_args(argv)
@@ -168,8 +190,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     configure_logging(config.log_level, secrets=[config.token.reveal()])
+    modes = {
+        "handshake": run,
+        "trade": run_trade_mode,
+        "walkthrough": run_walkthrough_mode,
+    }
     try:
-        return asyncio.run(run(config))
+        return asyncio.run(modes[config.mode](config))
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

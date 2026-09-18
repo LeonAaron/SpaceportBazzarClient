@@ -40,6 +40,8 @@ from bazaar_client.domain.types import (
 
 logger = logging.getLogger(__name__)
 
+SNAPSHOT_HISTORY = 128
+
 
 class SessionClosedError(RuntimeError):
     """Raised when the session ended before an awaited answer arrived."""
@@ -86,6 +88,9 @@ class BazaarSession:
         self._pump_task: asyncio.Task | None = None
 
         self._latest: Snapshot | None = None
+        # Several states can arrive back to back, so keep recent ones
+        # individually retrievable rather than only the newest.
+        self._by_sequence: dict[int, Snapshot] = {}
         self._snapshot_waiters: list[tuple[int, asyncio.Future]] = []
         self._command_waiters: dict[str, asyncio.Future] = {}
         self._readiness: ReadinessAck | None = None
@@ -126,6 +131,7 @@ class BazaarSession:
 
     async def start(self) -> None:
         self._readiness = None  # every connection needs its own readiness exchange
+        self._by_sequence.clear()  # sequences restart at 1 on a new connection
         await self._connection.connect()
         self._lifecycle.on_connected()
         self._recv_task = asyncio.create_task(
@@ -188,6 +194,10 @@ class BazaarSession:
             return
 
         self._latest = snapshot
+        self._by_sequence[snapshot.snapshot_sequence] = snapshot
+        if len(self._by_sequence) > SNAPSHOT_HISTORY:
+            for stale in sorted(self._by_sequence)[:-SNAPSHOT_HISTORY]:
+                del self._by_sequence[stale]
         self._throttle.update_limit(snapshot.rules.new_commands_per_station_per_tick)
         if self._ids is None:
             self._ids = RequestIdGenerator(snapshot.self_station_id)
@@ -276,6 +286,21 @@ class BazaarSession:
         self._snapshot_waiters.append((min_sequence, future))
         return await asyncio.wait_for(future, timeout)
 
+    async def wait_for_sequence(self, sequence: int, timeout: float = 15.0) -> Snapshot:
+        """Return the snapshot with exactly this sequence number.
+
+        Distinct from `wait_for_snapshot`, which yields whatever is newest:
+        when several states arrive together, verifying a documented sequence
+        needs that specific one rather than the most recent.
+        """
+        if sequence in self._by_sequence:
+            return self._by_sequence[sequence]
+
+        await self.wait_for_snapshot(min_sequence=sequence, timeout=timeout)
+        if sequence not in self._by_sequence:
+            raise SessionClosedError(f"snapshot {sequence} was never delivered")
+        return self._by_sequence[sequence]
+
     async def wait_for_readiness(self, timeout: float = 15.0) -> ReadinessAck:
         if self._readiness is not None:
             return self._readiness
@@ -287,6 +312,12 @@ class BazaarSession:
         snapshot = await self.wait_for_snapshot(min_sequence=1, timeout=timeout)
         ack = await self.wait_for_readiness(timeout=timeout)
         return snapshot, ack
+
+    async def send_sync(self) -> None:
+        """Request a fresh snapshot. It carries no request id, so nothing is awaited
+        here; the answer arrives as an ordinary state message."""
+        await self._connection.send(mappers.build_sync(self.run_id))
+        logger.info("sent sync for run %s", self.run_id)
 
     async def send_command(self, message, kind: str, request_id: str, timeout: float = 15.0) -> CommandOutcome:
         """Send one command and await its result or its protocol-level refusal."""

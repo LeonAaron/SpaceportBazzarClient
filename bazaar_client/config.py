@@ -62,6 +62,9 @@ class ClientConfig:
     log_level: str = "INFO"
     connect_timeout_s: float = 10.0
     reconnect_max_backoff_s: float = 30.0
+    mode: str = "trade"
+    evidence_file: Path | None = None
+    max_decisions: int | None = None
 
 
 def read_token_from_credentials(path: Path, station_id: str) -> str:
@@ -141,6 +144,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BAZAAR_LOG_LEVEL", "INFO"),
         help="logging level (env: BAZAAR_LOG_LEVEL)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("trade", "handshake", "walkthrough"),
+        default=os.environ.get("BAZAAR_MODE", "trade"),
+        help=(
+            "trade: run the trading policy; handshake: connect and advertise once; "
+            "walkthrough: replay the practice server's scripted exercise"
+        ),
+    )
+    parser.add_argument(
+        "--evidence-file",
+        type=Path,
+        default=(
+            Path(os.environ["BAZAAR_EVIDENCE_FILE"])
+            if os.environ.get("BAZAAR_EVIDENCE_FILE")
+            else None
+        ),
+        help="path for the JSONL decision log",
+    )
+    parser.add_argument(
+        "--max-decisions",
+        type=int,
+        default=None,
+        help="stop after this many decisions (useful for a bounded demo run)",
+    )
     return parser
 
 
@@ -152,4 +180,7 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         station_id=args.station_id,
         run_id_file=args.run_id_file,
         log_level=args.log_level,
+        mode=args.mode,
+        evidence_file=args.evidence_file,
+        max_decisions=args.max_decisions,
     )
