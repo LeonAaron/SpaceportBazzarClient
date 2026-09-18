@@ -85,12 +85,15 @@ class CounterpartyModel:
             stats = self._stations.setdefault(
                 station_id, CounterpartyStats(station_id)
             )
+            # The server emits a snapshot for every world change, so several can
+            # share one tick; only a later tick counts as the need persisting.
+            is_new_tick = snapshot.tick > stats.last_ad_tick
             stats.selling = selling
             stats.seeking = seeking
             stats.last_ad_tick = snapshot.tick
-            # A need repeated across ticks reads as distress, not normal timing.
-            for resource in seeking:
-                stats.seeking_streak[resource] = stats.seeking_streak.get(resource, 0) + 1
+            if is_new_tick:
+                for resource in seeking:
+                    stats.seeking_streak[resource] = stats.seeking_streak.get(resource, 0) + 1
             for resource in list(stats.seeking_streak):
                 if resource not in seeking:
                     del stats.seeking_streak[resource]

@@ -237,6 +237,27 @@ def test_a_repeated_need_builds_a_streak():
     assert model.get("P02").seeking_streak[Resource.WATER] == 3
 
 
+def test_several_snapshots_within_one_tick_count_as_one_observation():
+    """The server emits a snapshot per world change, so a tick can carry many."""
+    model = CounterpartyModel()
+    for sequence in range(1, 7):
+        model.update(
+            factories.make_snapshot(
+                tick=0,
+                snapshot_sequence=sequence,
+                advertisements=(
+                    factories.make_advertisement(
+                        station_id="P02",
+                        seeking=frozenset({Resource.WATER}),
+                        expires_tick=99,
+                    ),
+                ),
+            )
+        )
+
+    assert model.get("P02").seeking_streak[Resource.WATER] == 1
+
+
 def test_a_dropped_need_resets_its_streak():
     model = CounterpartyModel()
     model.update(
