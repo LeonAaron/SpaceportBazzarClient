@@ -65,9 +65,14 @@ class BazaarConnection:
 
     async def send(self, message, max_bytes: int | None = None) -> bytes:
         """Send one ClientMessage as binary protobuf. Returns the bytes sent."""
+        return await self.send_payload(
+            encode_client_message(message, max_bytes=max_bytes)
+        )
+
+    async def send_payload(self, payload: bytes) -> bytes:
+        """Send already-encoded bytes, for callers that must inspect them first."""
         if self._ws is None:
             raise NotConnectedError("send() before connect()")
-        payload = encode_client_message(message, max_bytes=max_bytes)
         await self._ws.send(payload)
         return payload
 

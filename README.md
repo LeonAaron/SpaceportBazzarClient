@@ -72,7 +72,7 @@ make test-integration  # against a real practice server it starts itself
 make cov               # coverage report
 ```
 
-385 tests, 91% coverage of handwritten code. The integration tests start their
+395 tests, 93% coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`.
 

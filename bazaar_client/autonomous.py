@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from bazaar_client.app import BazaarSession, CommandOutcome, SessionClosedError
+from bazaar_client.app import (
+    BazaarSession,
+    CommandOutcome,
+    SessionAbortedError,
+    SessionClosedError,
+)
+from bazaar_client.connection.ws_client import SubprotocolNotSelected
 from bazaar_client.config import ClientConfig
 from bazaar_client.domain.types import Phase, ResultCode, Snapshot
 from bazaar_client.execution.evidence import EvidenceLog
@@ -46,16 +53,25 @@ class TradingStats:
 
 
 class TradingLoop:
-    def __init__(self, session: BazaarSession, evidence_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        session: BazaarSession,
+        evidence_path: Path | None = None,
+        memory: PolicyMemory | None = None,
+        stats: TradingStats | None = None,
+        evidence: EvidenceLog | None = None,
+    ) -> None:
         self._session = session
         self._world = WorldModel()
         self._commitments = CommitmentTracker()
-        self._memory = PolicyMemory()
-        self._evidence = EvidenceLog(evidence_path)
+        # Carried across reconnects: what we learned about counterparties and
+        # how fast the market settles is still true on a new connection.
+        self._memory = memory or PolicyMemory()
+        self._evidence = evidence or EvidenceLog(evidence_path)
         self._executor = Executor(
             session, self._evidence, self._commitments, self._memory.counterparties
         )
-        self.stats = TradingStats()
+        self.stats = stats or TradingStats()
 
     @property
     def memory(self) -> PolicyMemory:
@@ -173,10 +189,59 @@ class TradingLoop:
             )
 
 
+def backoff_delay(attempt: int, cap: float) -> float:
+    """Exponential with jitter, so repeated drops do not hammer the server."""
+    base = min(cap, 1.0 * (2 ** max(0, attempt - 1)))
+    return base * random.uniform(0.8, 1.2)
+
+
 async def run_trading(
     config: ClientConfig,
     evidence_path: Path | None = None,
     max_decisions: int | None = None,
+    max_attempts: int | None = None,
+    sleep=asyncio.sleep,
 ) -> TradingStats:
-    async with BazaarSession(config) as session:
-        return await TradingLoop(session, evidence_path).run(max_decisions)
+    """Trade, reconnecting when the connection drops.
+
+    A run lasts many ticks and the planet keeps consuming upkeep throughout, so
+    a dropped connection has to be recovered rather than ending the run. Each
+    new connection repeats the readiness exchange; policy memory carries over,
+    while in-flight commitments do not, since their fate is unknown.
+    """
+    stats = TradingStats()
+    memory = PolicyMemory()
+    evidence = EvidenceLog(evidence_path)
+    attempt = 0
+
+    while max_attempts is None or attempt < max_attempts:
+        attempt += 1
+        try:
+            async with BazaarSession(config) as session:
+                loop = TradingLoop(
+                    session, memory=memory, stats=stats, evidence=evidence
+                )
+                await loop.run(max_decisions)
+
+                if session.abort_reason is not None:
+                    logger.error("not reconnecting: %s", session.abort_reason)
+                    return stats
+                if stats.final_snapshot is not None and (
+                    stats.final_snapshot.phase in TERMINAL_PHASES
+                ):
+                    return stats
+                if max_decisions is not None and stats.decisions >= max_decisions:
+                    return stats
+        except SessionAbortedError as exc:
+            logger.error("not reconnecting: %s", exc)
+            return stats
+        except (OSError, SessionClosedError, asyncio.TimeoutError) as exc:
+            logger.warning("connection problem: %s", exc)
+        except SubprotocolNotSelected:
+            raise  # a misconfigured client, not a transient fault
+
+        delay = backoff_delay(attempt, config.reconnect_max_backoff_s)
+        logger.info("reconnecting in %.1fs (attempt %d)", delay, attempt)
+        await sleep(delay)
+
+    return stats

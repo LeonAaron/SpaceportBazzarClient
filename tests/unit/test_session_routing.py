@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
+import bazaar_pb2
 import pytest
 
 from bazaar_client.app import BazaarSession, SessionClosedError
@@ -36,6 +37,12 @@ class FakeConnection:
     async def send(self, message, max_bytes=None) -> bytes:
         self.sent.append(message)
         return message.SerializeToString()
+
+    async def send_payload(self, payload: bytes) -> bytes:
+        message = bazaar_pb2.ClientMessage()
+        message.ParseFromString(payload)
+        self.sent.append(message)
+        return payload
 
     async def recv_loop(self, queue: asyncio.Queue) -> None:
         while True:
@@ -295,6 +302,55 @@ async def test_rate_limited_result_blocks_the_budget_until_retry_after_tick():
 
         assert session._throttle.blocked_until_tick == 12
         assert session._throttle.remaining(tick=11) == 0
+    finally:
+        await session.stop()
+
+
+async def test_reusing_an_id_for_new_content_is_blocked_before_transmitting():
+    """The guard is worthless after the fact: the conflicting command would
+    already be on the wire and the server would answer with a conflict."""
+    from bazaar_client.connection.requests import RequestIdConflictError
+
+    connection = FakeConnection()
+    session = await start_session(connection)
+    try:
+        await complete_handshake(connection, session)
+        first = mappers.build_advertise(session.run_id, "req-1", [Resource.WATER], [], 6)
+        pending = asyncio.create_task(
+            session.send_command(first, kind="advertise", request_id="req-1")
+        )
+        await asyncio.sleep(0)
+        await push(connection, factories.make_result(request_id="req-1"), session)
+        await asyncio.wait_for(pending, timeout=1)
+        sent_before = len(connection.sent)
+
+        changed = mappers.build_advertise(
+            session.run_id, "req-1", [Resource.COMPONENTS], [], 6
+        )
+        with pytest.raises(RequestIdConflictError):
+            await session.send_command(changed, kind="advertise", request_id="req-1")
+
+        assert len(connection.sent) == sent_before, "conflicting command was transmitted"
+    finally:
+        await session.stop()
+
+
+async def test_an_exact_retry_is_allowed_through():
+    """Resending the identical command with its id recovers the stored result."""
+    connection = FakeConnection()
+    session = await start_session(connection)
+    try:
+        await complete_handshake(connection, session)
+        message = mappers.build_advertise(session.run_id, "req-1", [Resource.WATER], [], 6)
+
+        for _ in range(2):
+            pending = asyncio.create_task(
+                session.send_command(message, kind="advertise", request_id="req-1")
+            )
+            await asyncio.sleep(0)
+            await push(connection, factories.make_result(request_id="req-1"), session)
+            outcome = await asyncio.wait_for(pending, timeout=1)
+            assert outcome.ok
     finally:
         await session.stop()
 

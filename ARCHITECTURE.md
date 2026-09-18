@@ -148,7 +148,7 @@ policy rather than eight other teams', and settlement is simulated. It shows the
 policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
-**Coverage** is 91% over handwritten code. The generated `bazaar_pb2.py` is
+**Coverage** is 93% over handwritten code. The generated `bazaar_pb2.py` is
 excluded (its correctness is covered by the round-trip tests instead), and
 `ws_client.py` sits lower than the rest because its socket I/O is exercised by
 the live integration run rather than by mocks.

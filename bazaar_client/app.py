@@ -12,6 +12,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from bazaar_client.codec.wire import encode_client_message
 from bazaar_client.config import ClientConfig
 from bazaar_client.connection.lifecycle import (
     Abort,
@@ -97,12 +98,23 @@ class BazaarSession:
         self._readiness_waiter: asyncio.Future | None = None
         self._closed = asyncio.Event()
         self._abort_reason: str | None = None
+        self._reconnect_wanted = False
 
     # --- properties -------------------------------------------------------
 
     @property
     def lifecycle(self) -> SessionLifecycle:
         return self._lifecycle
+
+    @property
+    def abort_reason(self) -> str | None:
+        """Set when a control error means retrying cannot help."""
+        return self._abort_reason
+
+    @property
+    def reconnect_wanted(self) -> bool:
+        """True when the server closed the session but a new one may succeed."""
+        return self._reconnect_wanted
 
     @property
     def latest_snapshot(self) -> Snapshot | None:
@@ -249,8 +261,12 @@ class BazaarSession:
             self._abort_reason = directive.reason
             self._fail_all_waiters(SessionAbortedError(directive.reason))
         elif isinstance(directive, Reconnect):
-            logger.warning("reconnect required: %s", directive.reason)
+            # close_session means the server considers this session over; reading
+            # on lets us act on a connection it has already discarded.
+            logger.warning("closing session: %s", directive.reason)
+            self._reconnect_wanted = True
             self._fail_all_waiters(SessionClosedError(directive.reason))
+            await self._connection.close()
 
     async def _send_ready(self, directive: SendReady) -> None:
         logger.info(
@@ -325,17 +341,27 @@ class BazaarSession:
         tick = snapshot.tick if snapshot else 0
         max_bytes = snapshot.rules.max_command_bytes if snapshot else None
 
+        # Encode and check the id before transmitting: reusing an id for
+        # different content earns RESULT_CODE_REQUEST_ID_CONFLICT, so the guard
+        # is only worth anything if it runs before the bytes leave.
+        payload = encode_client_message(message, max_bytes=max_bytes)
+        fingerprint = body_fingerprint(payload)
+        retry = self._tracker.is_exact_retry(request_id, fingerprint)
+        self._tracker.register(request_id, fingerprint, kind, tick)
+
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._command_waiters[request_id] = future
 
         try:
-            sent = await self._connection.send(message, max_bytes=max_bytes)
+            await self._connection.send_payload(payload)
         except Exception:
             self._command_waiters.pop(request_id, None)
             raise
 
-        self._tracker.register(request_id, body_fingerprint(sent), kind, tick)
         self._throttle.record_sent(tick)
-        logger.info("sent %s request_id=%s (%d bytes)", kind, request_id, len(sent))
+        logger.info(
+            "sent %s request_id=%s (%d bytes)%s",
+            kind, request_id, len(payload), " [exact retry]" if retry else "",
+        )
 
         return await asyncio.wait_for(future, timeout)
