@@ -50,21 +50,25 @@ decide(observation: Snapshot, memory: PolicyMemory, commitments, *, command_budg
 A pure function: no socket, no protobuf, no clock. Every situation in
 `tests/unit/test_decide_compose.py` and `tests/survival/` is a hand-built
 snapshot. `Decision` carries the chosen actions *and* the figures behind them
-(reserve, available, surplus, deficit, urgency) plus a reason per action, so a
-log can explain a choice after the fact.
+(reserve, available, import targets, spendable specialty, urgency) plus a reason
+per action, so a log can explain a choice after the fact.
 
-### Worked example: the field manual's shortage
+### Worked example: running low on an import
 
-Inventory `(2,0,1)`, production 3 water, upkeep 1 each. After the tick the
-planet holds `(4,0,0)` and is one food short — extra water cannot substitute.
+We produce water, hold `(40, 2, 30)` at tick 0 of a 120-tick run, and P02
+advertises selling food. Each import's target is 60 (the rest of the run, capped
+at 60 ticks of upkeep), so we are 58 short of food and 30 short of components.
+Water above its reserve of 3 gives 37 spendable.
 
 ```python
-urgency = compute_urgency(Bundle(4, 0, 0), upkeep=Bundle(1,1,1), reserve=Bundle(3,3,3))
-# FOOD -> CRITICAL, WATER -> NONE, COMPONENTS -> CRITICAL
+decide(snapshot, memory).actions
+# [AdvertiseAction(selling={WATER}, seeking={FOOD, COMPONENTS}, expires_tick=12),
+#  OfferAction("P02", give=Bundle(water=20), receive=Bundle(food=20), expires_tick=5),
+#  OfferAction("P02", give=Bundle(water=17), receive=Bundle(components=17), expires_tick=5)]
 ```
 
-`decide` then advertises food and components as sought, and offers water for
-them at a premium, because a critical need is worth settling quickly.
+The larger shortfall goes first, at the full trade size of 20. The components
+offer gets the 17 water still spendable. Both are one-for-one and paid in water.
 
 ### Worked example: a gift arrives
 
@@ -77,54 +81,119 @@ decide(snapshot_with(gift), memory) -> [AcceptAction(gift.offer_id)]
 A gift is an ordinary offer with an all-zero `receive`, and it still has to be
 accepted explicitly. It is always worth accepting: it costs nothing.
 
+## What run 2 taught us
+
+The Directorate's run 2 (nine planets, 120 ticks) ended with seven planets dead
+and the galaxy holding over a thousand unused units of **each** resource. It was
+a distribution failure, not a scarcity one. We were P01, a components producer.
+`scripts/analyze_run.py` reproduces these figures from the run log.
+
+| What P01 did | Result |
+|---|---|
+| Offers asking for more than they gave ("2 components for 4 water") | 72 sent, 67 expired |
+| Late offers overpaying up to 8:1 to a partner that had stopped accepting | all expired |
+| Gifted and traded away water, which it cannot produce | water hit zero at tick 70 |
+| Trades of 1–5 units, so every tick needed a fresh settlement | 21 of 155 offers accepted |
+| Kept offering to a planet whose client never connected | wasted commands |
+| **Outcome** | died at tick 83 holding 356 components and no water or food |
+
+The two survivors did the opposite: steady one-for-one offers, and every import
+bought with their own specialty. Those offers were also impossible for our
+committed code, so a different build had been deployed; the client now logs its
+branch and commit at startup.
+
 ## The trading policy
 
+Seven rules, each a direct answer to the table above:
+
+1. **Pay only with our specialty.** It regenerates every tick; the other two
+   resources arrive only by trade. Imports are never offered, gifted, or paid
+   away in an accept.
+2. **Strict one-for-one.** Every offer gives exactly as many units as it asks
+   for. An incoming offer is accepted only if we receive at least what we pay,
+   paid in specialty, for something we import. Gifts to us are always accepted.
+   All resources carry the same upkeep, so no unit is worth more than another.
+3. **Hold enough imports to outlast the market going quiet.** Each import's
+   target is enough upkeep for the rest of the run, at least 20 ticks and at most
+   60, never below the reserve. In run 2 most clients stopped trading around tick
+   45; a planet then lives exactly as long as its stored imports. We want
+   `target − available − already on order`, where "on order" is what our open
+   offers ask for plus what we accepted this tick. The cap of 60 was chosen in
+   simulation: 20 lost to planets that quit, 80 hoarded supply other planets
+   needed and shortened the world's survival.
+4. **Trade big, but learn each partner's size.** Offer size is
+   `min(20, want, spendable specialty, what this partner can take)`. A partner
+   short of stock cannot accept a large request however willing it is, so a
+   lapsed offer halves what we next ask that partner for and an accepted one
+   doubles it.
+5. **Ask likely producers.** Partners are ranked by advertising what we want,
+   having handed it to us before, seeking our specialty, recency and reliability.
+   Planets with no sign of a running client are skipped; if any planet shows
+   evidence of producing what we want, guesses are not tried. A partner is rested
+   for six ticks only once even one-unit offers to it keep lapsing — resting a
+   partner that is merely short of stock would cut off what may be the last
+   supplier. At most two offers per resource are open at once, to different
+   partners.
+6. **A steady advertisement.** Selling our specialty, seeking both imports —
+   true every tick, so it rarely changes and partners can rely on it. Renewed
+   before expiry at the longest lifetime the rules allow.
+7. **Gifts come only from idle specialty.** Once every import is at target,
+   specialty above 40 units (two full-size trades) funds gifts of
+   20% of that excess, capped at 10, one per tick, with a per-partner cooldown,
+   to planets advertising a need for it. In run 2 we ended holding 356 unused
+   components. Since every planet running this policy always seeks its imports,
+   this spreads spare stock round-robin rather than singling out a planet in
+   distress — health is private, so there is no better public signal.
+
 **Reserve.** Held in ticks of upkeep, read from `upkeep_per_tick` and `rules`,
-never hardcoded. The depth adapts to measured trade latency (median round-trip
-of our own settled offers), and deepens when health is low or when our own
-specialty's output has dipped. Capped so a jittery market cannot make us hoard.
+never hardcoded. The depth adapts to measured trade latency, and deepens when
+health is low or our own output has dipped. For our specialty it is the floor
+that offers, accepts and gifts never dip below.
 
 **Stock is `available_to_commit`, not inventory.** Inventory minus what open
-offers already promise, minus what is in flight. Within a proposed batch,
-acceptance costs and new offers share one spending balance; unconfirmed gains
-and withdrawals do not free stock for subsequent actions. Gifts use only the
-surplus and offer slots left after those actions.
-
-**Urgency.** `CRITICAL` when uncommitted stock cannot cover the next upkeep,
-`WATCH` below reserve, else `NONE`.
+offers already promise, minus what is in flight. Within one decision, accepts
+and new offers share one spending balance; unconfirmed gains do not become
+spendable.
 
 **Priority per tick**, spending the budget from
 `rules.new_commands_per_station_per_tick` top down:
 
-1. **Accept** worthwhile incoming offers — the only action that brings goods in.
-2. **Withdraw** offers promising something now critical. Expiry is free, so a
-   command is only spent when the terms became dangerous.
-3. **Advertise** — one slot per planet, so it is replaced only on a material
-   change, a new critical need, or near expiry.
-4. **Offer** — best counterparty per wanted resource, scored on what they
-   advertise selling and seeking, ad recency, and how reliably they have
-   accepted before. Never duplicates a pairing we already have open.
-5. **Gift** — only when nothing of ours is urgent.
+1. **Accept** worthwhile incoming offers — goods in, with no waiting.
+2. **Withdraw** offers promising specialty we now critically need.
+3. **Advertise** — only when missing, near expiry, or no longer true.
+4. **Offer** — one per need to its best partner, then a second choice.
+5. **Gift** — only once every import is at target.
 
-**Pricing.** No currency, so price is the ratio between bundles. All three
-resources carry equal upkeep, so 1:1 is the neutral baseline; urgency sweetens
-our side up to a hard cap. Rounding is half-up and the cap is enforced on the
-result, because ceiling a one-unit trade would silently pay a 100% premium for
-a need that was not urgent.
+**The trade-off we accepted.** Strict one-for-one never overpays, but it also
+cannot buy speed. In an economy that stays short for the whole run — production
+barely above upkeep and almost no starting stock — a planet cannot import two
+units a tick with one spare unit, and no policy that refuses to overpay can fix
+that (`test_a_starved_economy_is_outlasted_without_ever_trading_below_parity`).
+The real run is not like that: low phases last 12 ticks, and specialty stock
+built up in the 5–6 unit phases pays for imports through them.
 
-**Buffer target.** Our specialty is the only resource we generate; the other two
-can only arrive by trade. So surplus is converted toward twice the reserve
-*before* a shortage bites. Waiting for a deficit means starting negotiations
-with nothing left to trade — in simulation that alone was the difference between
-surviving and starving.
+## Measured survival
 
-**Altruism, and why it is not sentiment.** The class win condition is binary and
-collective: one planet at zero fails it for everyone, permanently. The prizes
-for prosperity are graded and personal. Trading a bounded, recoverable amount of
-idle surplus against a discrete, irreversible, shared failure is simply a good
-price. A planet kept alive also stays a trading partner. The caps make the
-downside bounded: only when nothing of ours is urgent, only from surplus above
-reserve, at most 20% of it, one gift per tick, with a per-station cooldown.
+`tests/survival/test_world_survival.py` plays full 120-tick runs under run 2's
+conditions against stand-ins for the clients seen in that run
+(`tests/survival/strategies.py`): one that never connected, the greedy build,
+small one-for-one traders, one that quit at tick 45, and one that gave its stock
+away. "World score" is planet-ticks lived across all nine planets (at most 1,080).
+
+| Scenario | Result |
+|---|---|
+| All nine planets run this policy | all survive at full health: 1,080 |
+| Run 2's field with the greedy P01 build | 0 survivors: 580 |
+| The same field with this policy as P01 | 4 survivors, us included: 761–764 |
+| Nobody trades | everyone fails at tick 40: 360 |
+| Our planet in each of 9 slots × 3 production phases of the run-2 field | survives all 120 ticks at full health in all 27, and no planet lasts longer or ends healthier |
+| Against eight greedy / gifting / quitting clients | ours is the last planet standing (vs quitters by 30+ ticks) |
+| Against eight small fair traders | everyone survives |
+
+Every level of adoption beats the run-2 field, and full adoption beats every
+mix. The tests were checked to fail when a weaker client stands in for ours, or
+when the import target is set back to 20. What they cannot show is how other
+teams' real clients will behave; the next class run is the real test.
 
 ## Execution and confirmation
 
@@ -152,7 +221,10 @@ are capped by both TTL and the run's duration.
 | Lifecycle | `tests/wire/test_lifecycle.py` — handshake, phase gating, control codes, reconnect |
 | State handling | `tests/state_handling/` — duplicate and out-of-order snapshots, commitments, counterparty inference |
 | Policy | `tests/unit/test_policy_*.py`, `test_decide_compose.py` — each rule, then the composed decision |
-| Survival | `tests/survival/` — shortage, production dips, permanent failure, three- and nine-planet economies, delayed acceptances and temporary outages |
+| Survival | `tests/survival/` — shortage, production dips, permanent failure, three- and nine-planet economies, delayed acceptances, temporary outages, and a replay of run 2 |
+| World survival | `tests/survival/test_world_survival.py` — full runs against stand-ins for run 2's clients: world score, adoption, and whether our planet outlives every other |
+| Trading rules | `tests/unit/test_trading_invariants.py` — every action across a grid of 192 situations is one-for-one, paid only in specialty, and within the reserve |
+| Logging and tooling | `tests/unit/test_decision_log.py`, `test_analyze_run.py` — decision records, build id, run-log analyzer |
 | Execution safety | `tests/unit/test_trading_safety.py` — send gates, same-tick quotas, delayed/missing results, confirmation, reconnects, and the full trading loop |
 | End to end | `tests/integration/` — the real practice server, ten scripted steps |
 
@@ -171,7 +243,7 @@ policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
 **Coverage** is 94% combined statement/branch coverage over handwritten code
-from all 420 tests, including the practice-server integration tests (`make cov`).
+from all 491 tests, including the practice-server integration tests (`make cov`).
 The generated `bazaar_pb2.py` is excluded (its correctness is covered by the round-trip tests instead), and
 remaining gaps include transport failure paths and supervisor/CLI branches.
 The live integration tests exercise the real socket and scripted exchange, but

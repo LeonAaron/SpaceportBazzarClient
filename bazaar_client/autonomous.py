@@ -25,6 +25,7 @@ from bazaar_client.connection.ws_client import SubprotocolNotSelected
 from bazaar_client.config import ClientConfig
 from bazaar_client.domain.types import Phase, ResultCode, Snapshot
 from bazaar_client.execution.evidence import EvidenceLog
+from bazaar_client.version import build_id
 from bazaar_client.execution.executor import Executor
 from bazaar_client.policy.decide import Decision, decide
 from bazaar_client.policy.memory import PolicyMemory
@@ -74,6 +75,7 @@ class TradingLoop:
             session, self._evidence, self._commitments, self._memory.counterparties
         )
         self.stats = stats or TradingStats()
+        self._last_logged_tick: int | None = None
 
     @property
     def memory(self) -> PolicyMemory:
@@ -86,8 +88,11 @@ class TradingLoop:
             raise SessionAbortedError("run changed on reconnect; restart with fresh policy memory")
         self._memory.run_id = snapshot.run_id
         logger.info(
-            "ready as %s: specialty %s, upkeep %s, %d planets in the directory",
+            "ready as %s in run %s (client build %s): specialty %s, upkeep %s, "
+            "%d planets in the directory",
             snapshot.self_station_id,
+            snapshot.run_id,
+            build_id(),
             snapshot.me.specialty.name,
             snapshot.me.upkeep_per_tick.as_dict(),
             len(snapshot.directory),
@@ -165,13 +170,20 @@ class TradingLoop:
             self._memory.block_until(outcome.result.retry_after_tick)
 
     def _log_decision(self, snapshot: Snapshot, decision: Decision) -> None:
+        # Several snapshots arrive per tick; record each tick once, plus every
+        # decision that actually acted, so the log stays readable.
+        if not decision.actions and snapshot.tick == self._last_logged_tick:
+            return
+        self._last_logged_tick = snapshot.tick
+        self._evidence.decision(snapshot, decision)
         logger.info(
-            "tick %d health %d inventory %s | reserve %s | %s",
+            "tick %d health %d inventory %s | import targets %s | spare %s %d",
             snapshot.tick,
             snapshot.me.health,
             snapshot.me.inventory.as_dict(),
-            decision.reserve.as_dict(),
-            ", ".join(f"{r.name}={u.name}" for r, u in decision.urgency.items()),
+            decision.targets.as_dict(),
+            snapshot.me.specialty.name,
+            decision.spendable,
         )
         for reason in decision.reasons:
             logger.info("  -> %s", reason)

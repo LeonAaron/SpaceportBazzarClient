@@ -23,6 +23,16 @@ MAX_SAFETY_TICKS = 10
 LOW_HEALTH_EXTRA_TICKS = 2
 PRODUCTION_VARIANCE_EXTRA_TICKS = 1
 
+# Resources we cannot produce arrive only when a trade settles, and partners can
+# go quiet at any time -- in run 2 most clients stopped trading around tick 45.
+# So we aim to hold enough of each import to last the rest of the run if trading
+# stopped now: at least IMPORT_TARGET_MIN_TICKS of upkeep, at most
+# IMPORT_TARGET_MAX_TICKS. The cap was chosen in the mixed-opponent simulation
+# (tests/survival/test_world_survival.py): higher caps hoarded supply other
+# planets needed and lowered how long the world as a whole survived.
+IMPORT_TARGET_MIN_TICKS = 20
+IMPORT_TARGET_MAX_TICKS = 60
+
 
 class Urgency(enum.IntEnum):
     NONE = 0
@@ -74,6 +84,28 @@ def compute_urgency(
         else:
             urgency[resource] = Urgency.NONE
     return urgency
+
+
+def import_target_ticks(ticks_remaining: int) -> int:
+    return max(IMPORT_TARGET_MIN_TICKS, min(IMPORT_TARGET_MAX_TICKS, ticks_remaining))
+
+
+def import_target(station: StationObservation, reserve: Bundle, ticks_remaining: int) -> Bundle:
+    """How much of each imported resource to hold; zero for our own specialty."""
+    ticks = import_target_ticks(ticks_remaining)
+    return Bundle(
+        *(
+            0
+            if r == station.specialty
+            else max(reserve.get(r), station.upkeep_per_tick.get(r) * ticks)
+            for r in Resource
+        )
+    )
+
+
+def specialty_spendable(available: Bundle, reserve: Bundle, specialty: Resource) -> int:
+    """Specialty stock we can promise away: everything above its reserve."""
+    return max(0, available.get(specialty) - reserve.get(specialty))
 
 
 def surplus_above_reserve(available: Bundle, reserve: Bundle) -> Bundle:

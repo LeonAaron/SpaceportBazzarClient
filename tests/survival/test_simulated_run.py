@@ -451,7 +451,7 @@ def test_open_offers_never_promise_more_than_we_hold():
         economy.advance_tick()
 
 
-@pytest.mark.parametrize("production", [2, 3, 5])
+@pytest.mark.parametrize("production", [3, 5])
 def test_the_planet_survives_across_production_levels(production):
     """Surplus describes the whole run, not every moment of it."""
     economy = build_economy(production=production)
@@ -459,6 +459,24 @@ def test_the_planet_survives_across_production_levels(production):
     run_simulation(economy, ticks=30)
 
     assert economy.stations[US].health > 0
+
+
+def test_a_starved_economy_is_outlasted_without_ever_trading_below_parity():
+    """At production 2 with 5 units of starting stock, the whole economy makes
+    less water than it consumes, so strict 1:1 cannot import two units a tick
+    for the one we can spare. We refuse to overpay, but must still beat doing
+    nothing. The real run avoids this: low phases last 12 ticks and are paid
+    for from specialty stock built up in the high ones.
+    """
+    traded = build_economy(production=2)
+    run_simulation(traded, ticks=30)
+
+    passive = build_economy(production=2)
+    for _ in range(30):
+        passive.advance_tick()
+
+    assert traded.stations[US].shortage_ticks < passive.stations[US].shortage_ticks
+    assert all_trades_at_parity(traded)
 
 
 @pytest.mark.parametrize("disrupted", [False, True])
@@ -493,6 +511,69 @@ def test_nine_planets_with_different_response_times_and_variable_production(disr
     assert all(not s.failed_once for s in economy.stations.values())
     assert all(s.imported.total() > 0 for s in economy.stations.values())
     assert not economy.rejections
+
+
+def all_trades_at_parity(economy) -> bool:
+    """Every settlement was a gift or exactly one-for-one."""
+    return all(
+        t.receive.is_zero() or t.give.total() == t.receive.total()
+        for t in economy.transactions
+    )
+
+
+PHASES = (2, 5, 6)
+PHASE_TICKS = 12
+
+
+def test_run_two_replayed_every_trading_planet_survives():
+    """The class run that failed: nine planets, 30 of everything at the start,
+    production cycling 2/5/6 in 12-tick phases, one planet whose client never
+    connected (P02) and one that went quiet at tick 45 (P05).
+
+    Every planet still trading must reach the end of the 120-tick run.
+    """
+    economy = SimulatedEconomy(*(
+        SimStation(f"P{i + 1:02}", list(Resource)[i % 3], Bundle(30, 30, 30))
+        for i in range(9)
+    ))
+    silent, quits = "P02", "P05"
+    clients = SimulatedClients(economy, trading=set(economy.stations) - {silent})
+
+    for tick in range(120):
+        for i, station in enumerate(economy.stations.values()):
+            station.production = PHASES[(tick // PHASE_TICKS + i) % len(PHASES)]
+        if tick == 45:
+            clients.trading.discard(quits)
+        clients.step()
+        economy.advance_tick()
+
+    survivors = {sid for sid, s in economy.stations.items() if not s.failed_once}
+    assert survivors >= set(economy.stations) - {silent, quits}
+    assert all_trades_at_parity(economy)
+    # Commands addressed to the planet that quit and then failed are refused;
+    # the live executor marks such a station failed on the first refusal.
+    assert {code for _, code in economy.rejections} <= {"STATION_FAILED"}
+
+
+def test_run_two_replayed_we_never_pay_with_what_we_cannot_produce():
+    """Run 2: P01 paid and gifted water it could not make, then starved of it."""
+    economy = SimulatedEconomy(*(
+        SimStation(f"P{i + 1:02}", list(Resource)[i % 3], Bundle(30, 30, 30))
+        for i in range(9)
+    ))
+    clients = SimulatedClients(economy)
+    for tick in range(60):
+        for i, station in enumerate(economy.stations.values()):
+            station.production = PHASES[(tick // PHASE_TICKS + i) % len(PHASES)]
+        clients.step()
+        economy.advance_tick()
+
+    specialty = {sid: s.specialty for sid, s in economy.stations.items()}
+    for txn in economy.transactions:
+        paid_by_proposer = txn.give
+        paid_by_recipient = txn.receive
+        assert set(r for r in Resource if paid_by_proposer.get(r)) <= {specialty[txn.proposer_id]}
+        assert set(r for r in Resource if paid_by_recipient.get(r)) <= {specialty[txn.recipient_id]}
 
 
 def sum_bundles(bundles):

@@ -193,7 +193,8 @@ def test_several_accepts_in_one_tick_cannot_overspend_the_same_stock():
     decision, _ = decide(
         snapshot(
             rules=factories.make_rules(new_commands_per_station_per_tick=10),
-            me=station(inventory=Bundle(water=4, food=0, components=30)),
+            # Reserve is 3 water, so 5 are spendable: enough for one 3-for-3 accept.
+            me=station(inventory=Bundle(water=8, food=0, components=30)),
             offers=offers,
         ),
         PolicyMemory(),
