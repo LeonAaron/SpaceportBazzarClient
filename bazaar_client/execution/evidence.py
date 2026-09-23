@@ -46,6 +46,7 @@ class EvidenceLog:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path
         self._records: list[EvidenceRecord] = []
+        self._decisions: list[dict[str, Any]] = []
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("")
@@ -53,6 +54,28 @@ class EvidenceLog:
     @property
     def records(self) -> list[EvidenceRecord]:
         return list(self._records)
+
+    @property
+    def decisions(self) -> list[dict[str, Any]]:
+        return list(self._decisions)
+
+    def decision(self, snapshot: Snapshot, decision) -> None:
+        """What the policy saw and chose, so a later failure can be explained."""
+        entry = {
+            "kind": "decision",
+            "tick": snapshot.tick,
+            "snapshot_sequence": snapshot.snapshot_sequence,
+            "health": snapshot.me.health,
+            "inventory": snapshot.me.inventory.as_dict(),
+            "available": decision.available.as_dict(),
+            "import_targets": decision.targets.as_dict(),
+            "specialty_spendable": decision.spendable,
+            "open_outgoing_offers": len(snapshot.outgoing_open_offers()),
+            "actions": [{"kind": a.kind, **a.describe()} for a in decision.actions],
+            "reasons": list(decision.reasons),
+        }
+        self._decisions.append(entry)
+        self._write_line(json.dumps(entry))
 
     def start(self, step: str, action, observed: Snapshot | None) -> EvidenceRecord:
         record = EvidenceRecord(
@@ -77,7 +100,9 @@ class EvidenceLog:
         self._write(record)
 
     def _write(self, record: EvidenceRecord) -> None:
-        line = record.as_json()
+        self._write_line(record.as_json())
+
+    def _write_line(self, line: str) -> None:
         logger.debug("evidence %s", line)
         if self._path is not None:
             with self._path.open("a", encoding="utf-8") as handle:

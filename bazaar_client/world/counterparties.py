@@ -31,6 +31,19 @@ class CounterpartyStats:
     offers_sent_to: int = 0
     offers_accepted_by: int = 0
     station_failed: bool = False
+    # Resources this station has actually handed us: the strongest evidence of
+    # what it produces, since specialties are never disclosed.
+    supplied: set[Resource] = field(default_factory=set)
+    # Whether it has ever shown signs of a running client. A planet whose client
+    # never connected will ignore every offer we send it.
+    ever_active: bool = False
+    consecutive_expired: int = 0
+    last_expired_tick: int = -1
+    # The largest trade this partner seems able to take, learned from our own
+    # offers: halved when one lapses, doubled when one is accepted. None until
+    # an offer tells us something. A partner short of stock cannot accept a
+    # large request however willing it is.
+    size_limit: int | None = None
 
     @property
     def accept_rate(self) -> float:
@@ -60,6 +73,7 @@ class CounterpartyModel:
         self._update_directory(snapshot)
         self._update_advertisements(snapshot)
         self._update_offer_history(snapshot)
+        self._update_supply(snapshot)
 
     def _update_directory(self, snapshot: Snapshot) -> None:
         for entry in snapshot.directory:
@@ -91,6 +105,7 @@ class CounterpartyModel:
             stats.selling = selling
             stats.seeking = seeking
             stats.last_ad_tick = snapshot.tick
+            stats.ever_active = True
             if is_new_tick:
                 for resource in seeking:
                     stats.seeking_streak[resource] = stats.seeking_streak.get(resource, 0) + 1
@@ -107,6 +122,12 @@ class CounterpartyModel:
     def _update_offer_history(self, snapshot: Snapshot) -> None:
         """Count each of our offers once, when it reaches a settled status."""
         for offer in snapshot.offers:
+            if offer.recipient_id == snapshot.self_station_id:
+                # Proposing to us proves a live client, whatever its terms.
+                self._stations.setdefault(
+                    offer.proposer_id, CounterpartyStats(offer.proposer_id)
+                ).ever_active = True
+                continue
             if offer.proposer_id != snapshot.self_station_id:
                 continue
             # Only outcomes the recipient decided count. A withdrawal is our own
@@ -120,5 +141,31 @@ class CounterpartyModel:
                 offer.recipient_id, CounterpartyStats(offer.recipient_id)
             )
             stats.offers_sent_to += 1
+            asked = offer.receive.total()
             if offer.status is OfferStatus.ACCEPTED:
                 stats.offers_accepted_by += 1
+                stats.consecutive_expired = 0
+                if stats.size_limit is not None:
+                    stats.size_limit *= 2
+            else:
+                stats.consecutive_expired += 1
+                stats.last_expired_tick = max(
+                    stats.last_expired_tick,
+                    offer.closed_tick if offer.closed_tick is not None else offer.expires_tick,
+                )
+                if asked:  # a declined gift says nothing about trade size
+                    stats.size_limit = max(1, asked // 2)
+
+    def _update_supply(self, snapshot: Snapshot) -> None:
+        """Record what each partner has handed us in a settled trade."""
+        me = snapshot.self_station_id
+        for txn in snapshot.transactions:
+            if me == txn.recipient_id:
+                partner, received = txn.proposer_id, txn.give
+            elif me == txn.proposer_id:
+                partner, received = txn.recipient_id, txn.receive
+            else:
+                continue
+            stats = self._stations.setdefault(partner, CounterpartyStats(partner))
+            stats.ever_active = True
+            stats.supplied.update(r for r in Resource if received.get(r) > 0)

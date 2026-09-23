@@ -13,7 +13,12 @@ from bazaar_client.domain.types import Bundle, Phase, Resource
 from bazaar_client.execution.actions import AdvertiseAction, OfferAction
 from bazaar_client.policy.decide import decide
 from bazaar_client.policy.memory import PolicyMemory
-from bazaar_client.policy.reserves import Urgency, compute_reserve, compute_urgency
+from bazaar_client.policy.pricing import TRADE_SIZE_MAX
+from bazaar_client.policy.reserves import (
+    Urgency,
+    compute_reserve,
+    compute_urgency,
+)
 from tests.fixtures import factories
 
 
@@ -66,16 +71,9 @@ def test_a_starving_station_both_advertises_and_offers_for_what_it_lacks():
     assert offered and offered[0].receive.food > 0
 
 
-def test_a_starving_station_pays_a_premium_to_settle_faster():
-    """Health lost to a shortage cannot be bought back later."""
-    calm, _ = decide(
-        state(
-            me=factories.make_station(inventory=Bundle(water=40, food=2, components=40)),
-            advertisements=(peer_ad(Resource.FOOD),),
-        ),
-        PolicyMemory(),
-    )
-    desperate, _ = decide(
+def test_a_starving_station_still_trades_one_for_one_but_asks_for_its_whole_need():
+    """Overpaying does not make a partner accept faster; asking for enough does."""
+    decision, _ = decide(
         state(
             me=factories.make_station(inventory=Bundle(water=40, food=0, components=40)),
             advertisements=(peer_ad(Resource.FOOD),),
@@ -83,11 +81,9 @@ def test_a_starving_station_pays_a_premium_to_settle_faster():
         PolicyMemory(),
     )
 
-    def rate(decision):
-        offer = [a for a in decision.actions if isinstance(a, OfferAction) and not a.is_gift][0]
-        return offer.give.total() / offer.receive.total()
-
-    assert rate(desperate) > rate(calm)
+    offer = [a for a in decision.actions if isinstance(a, OfferAction) and not a.is_gift][0]
+    assert offer.give == Bundle(water=offer.receive.total())
+    assert offer.receive.food == TRADE_SIZE_MAX  # the whole need, capped per trade
 
 
 def test_a_station_short_of_everything_still_keeps_within_budget():

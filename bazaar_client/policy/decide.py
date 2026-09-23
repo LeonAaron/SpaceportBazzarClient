@@ -4,14 +4,23 @@ A pure function of a snapshot plus carried memory: no socket, no protobuf, no
 clock. That keeps the trading policy testable on synthetic states and makes the
 reasoning behind an action inspectable after the fact.
 
+The policy in one paragraph: we produce one resource and must import the other
+two every tick. We keep enough of each import to outlast partners going quiet
+(up to 60 ticks of upkeep, or the rest of the run) and pay for it only with
+our own specialty, always one-for-one, in trades large enough to cover many
+ticks at once, offered to the partners most likely to hold what we want. We
+advertise exactly that. Once our imports are secure, spare specialty goes as
+gifts to planets that keep asking for it, because one planet failing fails the
+whole class.
+
 Actions are chosen in order of what they protect, spending the tick's command
 budget top down:
 
-  1. accept offers worth taking  -- the only action that actually moves goods in
+  1. accept offers worth taking  -- goods in, with no waiting on anyone
   2. withdraw offers turned dangerous -- stop promising what we now need
   3. refresh the advertisement   -- how counterparties find us at all
-  4. propose targeted offers     -- fill what we are short of
-  5. gift to a struggling planet -- only when nothing of ours is at risk
+  4. propose targeted offers     -- fill our import buffers
+  5. gift to a struggling planet -- only when our imports are secure
 """
 
 from __future__ import annotations
@@ -23,7 +32,6 @@ from bazaar_client.domain.types import Bundle, Phase, Resource, Snapshot
 from bazaar_client.execution.actions import (
     AcceptAction,
     Action,
-    AdvertiseAction,
     OfferAction,
     WithdrawAction,
 )
@@ -31,12 +39,14 @@ from bazaar_client.policy.accept import evaluate_incoming
 from bazaar_client.policy.advertising import decide_advertisement
 from bazaar_client.policy.altruism import scan_for_distress
 from bazaar_client.policy.memory import PolicyMemory
-from bazaar_client.policy.pricing import CannotAfford, compute_terms, desired_quantity
+from bazaar_client.policy.pricing import TRADE_SIZE_MAX, CannotAfford, compute_terms
 from bazaar_client.policy.reserves import (
     Urgency,
     compute_reserve,
     compute_urgency,
     deficit_below_reserve,
+    import_target,
+    specialty_spendable,
     surplus_above_reserve,
 )
 from bazaar_client.policy.targeting import rank_counterparties
@@ -45,9 +55,9 @@ from bazaar_client.world.commitments import CommitmentTracker
 logger = logging.getLogger(__name__)
 
 OFFER_TTL = 5
-# Stock we cannot produce is worth holding deeper than the bare reserve, since
-# replacing it depends entirely on someone else agreeing to trade.
-TARGET_BUFFER_MULTIPLE = 2
+# Specialty kept back from gifts: enough to fund a full-size trade for each of
+# our two imports.
+GIFT_FLOOR = 2 * TRADE_SIZE_MAX
 
 
 @dataclass
@@ -60,6 +70,8 @@ class Decision:
     available: Bundle = field(default_factory=Bundle.zero)
     surplus: Bundle = field(default_factory=Bundle.zero)
     deficit: Bundle = field(default_factory=Bundle.zero)
+    targets: Bundle = field(default_factory=Bundle.zero)
+    spendable: int = 0
     urgency: dict[Resource, Urgency] = field(default_factory=dict)
 
     def add(self, action: Action, reason: str) -> None:
@@ -76,19 +88,21 @@ def decide(
 ) -> tuple[Decision, PolicyMemory]:
     memory = memory.observe(observation)
     commitments = commitments or CommitmentTracker()
+    specialty = observation.me.specialty
 
     reserve = compute_reserve(observation.rules, observation.me, memory)
     available = commitments.available_to_commit(observation)
     urgency = compute_urgency(available, observation.me.upkeep_per_tick, reserve)
-    surplus = surplus_above_reserve(available, reserve)
-    deficit = deficit_below_reserve(available, reserve)
-    critical = frozenset(r for r, level in urgency.items() if level is Urgency.CRITICAL)
 
     decision = Decision(
         reserve=reserve,
         available=available,
-        surplus=surplus,
-        deficit=deficit,
+        surplus=surplus_above_reserve(available, reserve),
+        deficit=deficit_below_reserve(available, reserve),
+        targets=import_target(
+            observation.me, reserve, observation.rules.duration_ticks - observation.tick
+        ),
+        spendable=specialty_spendable(available, reserve, specialty),
         urgency=urgency,
     )
 
@@ -114,45 +128,45 @@ def decide(
     if command_budget is not None:
         budget = min(budget, max(0, command_budget))
 
-    budget, available = _accept_incoming(
-        decision, observation, available, reserve, urgency, budget
-    )
     # Spend from one shared balance throughout the proposed batch. Accepted
-    # gains are not spendable until confirmed by the server.
-    surplus = surplus_above_reserve(available, reserve)
-    deficit = deficit_below_reserve(available, reserve)
+    # gains are not spendable until the server confirms them, but they do count
+    # as on order so we do not ask elsewhere for the same units.
+    budget, available, incoming = _accept_incoming(decision, observation, available, reserve, budget)
     urgency = compute_urgency(available, observation.me.upkeep_per_tick, reserve)
-    critical = frozenset(r for r, level in urgency.items() if level is Urgency.CRITICAL)
     budget = _withdraw_dangerous(decision, observation, urgency, budget)
-    budget = _refresh_advertisement(
-        decision, observation, surplus, deficit, critical, budget
+    budget = _refresh_advertisement(decision, observation, available, reserve, budget)
+    budget, available = _propose_offers(
+        decision, observation, memory, available, reserve, incoming, budget
     )
-    budget, surplus = _propose_offers(
-        decision, observation, memory, available, surplus, deficit, urgency, budget
-    )
-    _offer_aid(decision, observation, memory, surplus, urgency, budget)
+    _offer_aid(decision, observation, memory, available, reserve, budget)
 
     return decision, memory
 
 
-def _accept_incoming(decision, observation, available, reserve, urgency, budget):
-    # Simulated locally so several accepts in one tick cannot overspend.
+def _accept_incoming(decision, observation, available, reserve, budget):
+    """Simulated locally so several accepts in one tick cannot overspend."""
+    specialty = observation.me.specialty
+    me = observation.self_station_id
     running = available
-    for offer in observation.incoming_open_offers():
+    incoming = Bundle.zero()
+    # Gifts and the largest deliveries first: each accept settles immediately.
+    offers = sorted(
+        observation.incoming_open_offers(),
+        key=lambda o: (-o.what_station_receives(me).total(), o.offer_id),
+    )
+    for offer in offers:
         if budget <= 0:
             break
         verdict = evaluate_incoming(
-            offer, observation.self_station_id, running, reserve, urgency
+            offer, me, specialty, specialty_spendable(running, reserve, specialty)
         )
         if not verdict.accept:
             continue
         decision.add(AcceptAction(offer.offer_id), f"accept {offer.offer_id}: {verdict.reason}")
         budget -= 1
-        running = running.saturating_sub(
-            offer.what_station_pays(observation.self_station_id)
-        )
-        urgency = compute_urgency(running, observation.me.upkeep_per_tick, reserve)
-    return budget, running
+        running = running.saturating_sub(offer.what_station_pays(me))
+        incoming = incoming + offer.what_station_receives(me)
+    return budget, running, incoming
 
 
 def _withdraw_dangerous(decision, observation, urgency, budget):
@@ -173,13 +187,13 @@ def _withdraw_dangerous(decision, observation, urgency, budget):
     return budget
 
 
-def _refresh_advertisement(decision, observation, surplus, deficit, critical, budget):
+def _refresh_advertisement(decision, observation, available, reserve, budget):
     if budget <= 0:
         return budget
+    specialty = observation.me.specialty
     verdict = decide_advertisement(
-        surplus,
-        deficit,
-        critical,
+        specialty,
+        specialty_spendable(available, reserve, specialty),
         observation.own_advertisement(),
         observation.tick,
         observation.rules,
@@ -190,31 +204,36 @@ def _refresh_advertisement(decision, observation, surplus, deficit, critical, bu
     return budget - 1
 
 
-def _wanted_quantities(observation, available, reserve, deficit) -> dict[Resource, int]:
-    """What to ask for, including before a shortage actually bites.
+def _wanted_quantities(observation, available, targets, incoming) -> dict[Resource, int]:
+    """How far each import is below target, net of what is already on order.
 
-    Our specialty is the only resource we generate; the other two can only ever
-    arrive by trade. Waiting for a deficit before acting means starting the
-    exchange with no buffer left, so surplus is converted toward a target of
-    twice the reserve while there is still something to trade with.
+    "On order" is what our open offers ask for plus what we accepted this tick.
+    Our specialty is never wanted: we produce it.
     """
+    on_order = incoming
+    for offer in observation.outgoing_open_offers():
+        on_order = on_order + offer.receive
     wanted: dict[Resource, int] = {}
     for resource in Resource:
-        short = deficit.get(resource)
-        if resource != observation.me.specialty:
-            target = reserve.get(resource) * TARGET_BUFFER_MULTIPLE
-            short = max(short, target - available.get(resource))
+        if resource == observation.me.specialty:
+            continue
+        short = targets.get(resource) - available.get(resource) - on_order.get(resource)
         if short > 0:
             wanted[resource] = short
     return wanted
 
 
-def _propose_offers(decision, observation, memory, available, surplus, deficit, urgency, budget):
+def _propose_offers(decision, observation, memory, available, reserve, incoming, budget):
+    specialty = observation.me.specialty
     open_outgoing = observation.outgoing_open_offers()
     room = observation.rules.max_open_outgoing_offers - len(open_outgoing)
     if room <= 0:
         decision.reasons.append("outgoing offer limit reached")
-        return budget, surplus
+        return budget, available
+
+    wanted = _wanted_quantities(observation, available, decision.targets, incoming)
+    if not wanted:
+        return budget, available
 
     # An offer already standing for this pairing still promises that stock.
     pending = frozenset(
@@ -224,28 +243,17 @@ def _propose_offers(decision, observation, memory, available, surplus, deficit, 
         if offer.receive.get(resource) > 0
     )
 
-    wanted = _wanted_quantities(
-        observation, available, decision.reserve, deficit
-    )
-
-    running_surplus = surplus
     for candidate in rank_counterparties(
-        memory.counterparties,
-        urgency,
-        wanted,
-        running_surplus,
-        observation.tick,
-        already_pending=pending,
+        memory.counterparties, specialty, wanted, observation.tick, already_pending=pending
     ):
         if budget <= 0 or room <= 0:
             break
         try:
             give, receive = compute_terms(
                 candidate.want,
-                desired_quantity(wanted[candidate.want]),
-                candidate.give,
-                running_surplus,
-                urgency[candidate.want],
+                min(wanted[candidate.want], candidate.size_limit),
+                specialty,
+                specialty_spendable(available, reserve, specialty),
             )
         except CannotAfford:
             continue
@@ -256,22 +264,29 @@ def _propose_offers(decision, observation, memory, available, surplus, deficit, 
             break
         decision.add(
             OfferAction(candidate.station_id, give, receive, observation.tick + ttl),
-            f"offer {give.total()} {candidate.give.name} for {receive.total()} "
+            f"offer {give.total()} {specialty.name} for {receive.total()} "
             f"{candidate.want.name} to {candidate.station_id}",
         )
-        running_surplus = running_surplus.saturating_sub(give)
+        available = available.saturating_sub(give)
         budget -= 1
         room -= 1
-    return budget, running_surplus
+    return budget, available
 
 
-def _offer_aid(decision, observation, memory, surplus, urgency, budget):
+def _offer_aid(decision, observation, memory, available, reserve, budget):
     planned_offers = sum(isinstance(a, OfferAction) for a in decision.actions)
     if (budget <= 0 or len(observation.outgoing_open_offers()) + planned_offers
             >= observation.rules.max_open_outgoing_offers):
         return
+    specialty = observation.me.specialty
+    targets = decision.targets
+    if any(available.get(r) < targets.get(r) for r in Resource if r != specialty):
+        return  # secure our own imports first
+
+    floor = max(reserve.get(specialty), GIFT_FLOOR * observation.me.upkeep_per_tick.get(specialty))
+    excess = available.get(specialty) - floor
     for gift in scan_for_distress(
-        memory.counterparties, surplus, urgency, observation.tick, memory
+        memory.counterparties, specialty, excess, observation.tick, memory
     ):
         if budget <= 0:
             break
@@ -287,7 +302,7 @@ def _offer_aid(decision, observation, memory, surplus, urgency, budget):
                 observation.tick + ttl,
             ),
             f"gift {gift.quantity} {gift.resource.name} to {gift.station_id}: "
-            "sustained unmet need",
+            "keeps seeking what we produce",
         )
         memory.record_gift(gift.station_id, gift.resource, observation.tick)
         budget -= 1
