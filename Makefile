@@ -14,7 +14,7 @@ test-integration:
 	$(EXEC) pytest -m integration
 
 cov:
-	$(EXEC) pytest -m "not integration" --cov=bazaar_client --cov-report=term-missing
+	$(EXEC) pytest --cov=bazaar_client --cov-branch --cov-report=term-missing
 
 run:
 	$(EXEC) python -m bazaar_client.cli $(ARGS)

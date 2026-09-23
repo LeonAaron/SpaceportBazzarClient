@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from bazaar_client.app import BazaarSession, CommandOutcome
+from bazaar_client.app import BazaarSession, CommandBlockedError, CommandOutcome
 from bazaar_client.domain import mappers
 from bazaar_client.domain.types import ResultCode
 from bazaar_client.execution.actions import (
@@ -86,17 +86,25 @@ class Executor:
             outcome = await self._session.send_command(
                 message, kind=action.kind, request_id=request_id, timeout=timeout
             )
-        except BaseException:
-            # A timeout or lost connection must not leave stock reserved for an
-            # offer we never learned the fate of, nor drop the evidence.
-            self._evidence.note(record, "no answer: send failed or connection lost")
-            self._evidence.complete(record)
-            raise
-        finally:
+            self._record_outcome(record, outcome)
+            if not outcome.ok:
+                self._commitments.resolve_inflight(request_id)
+            confirmed = None
+            if outcome.result is not None:
+                confirmed = await self._session.wait_for_result_snapshot(outcome.result, timeout)
             self._commitments.resolve_inflight(request_id)
-
-        self._record_outcome(record, outcome)
-        return outcome
+            self._evidence.complete(record, confirmed)
+            self._last_record = None
+            return outcome
+        except BaseException as exc:
+            # A timeout is ambiguous: hold stock until this session is discarded.
+            # The trading loop reconnects and starts from an authoritative state.
+            if isinstance(exc, CommandBlockedError):
+                self._commitments.resolve_inflight(request_id)
+            self._evidence.note(record, "no answer or confirmation: send failed or connection lost")
+            self._evidence.complete(record)
+            self._last_record = None
+            raise
 
     def _record_outcome(self, record, outcome: CommandOutcome) -> None:
         if outcome.result is not None:

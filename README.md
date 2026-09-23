@@ -69,18 +69,19 @@ are gitignored.
 ```sh
 make test              # unit, wire, state handling, survival
 make test-integration  # against a real practice server it starts itself
-make cov               # coverage report
+make cov               # full suite, including integration, with branch coverage
 ```
 
-396 tests, 93% coverage of handwritten code. The integration tests start their
+420 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`.
 
 Worth knowing: the practice server runs **one fixed script**. It proves the wire
 format, handshake and command set exactly, and it cannot exercise the trading
 policy — any unscripted command ends the exercise as `scenario mismatch`, by
-design. The policy is covered by unit tests and by a simulated multi-tick
-economy instead. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
+design. The policy is covered by unit tests and simulated multi-tick
+economies, including nine planets with variable production, delayed acceptance,
+and temporary outages. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
 
 ## Layout
 
@@ -94,4 +95,13 @@ bazaar_client/
   execution/   actions, sending, evidence log
   autonomous.py         the trading loop
   scripted_walkthrough.py  the practice exercise replay
+```
+
+After dependency or Dockerfile changes, rebuild the running service with
+`docker compose up -d --build` before using the Makefile targets. To test in a
+fresh container without restarting an existing practice exercise:
+
+```sh
+docker compose build
+docker compose run --rm --no-deps bazaar sh -c 'scripts/gen_proto.sh && pytest --cov=bazaar_client --cov-branch'
 ```

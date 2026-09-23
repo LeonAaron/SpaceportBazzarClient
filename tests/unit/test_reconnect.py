@@ -138,7 +138,7 @@ class ScriptedSession:
     attempts: list = []
     script: list = []
 
-    def __init__(self, config):
+    def __init__(self, config, **kwargs):
         self.config = config
         self.behaviour = self.script[len(self.attempts)] if len(self.attempts) < len(self.script) else "ok"
         self.attempts.append(self.behaviour)

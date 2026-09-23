@@ -89,7 +89,7 @@ class SimStation:
 
 
 class SimulatedEconomy:
-    """Three planets, one of each specialty, trading through offers."""
+    """A configurable roster trading under the published limits."""
 
     def __init__(self, *stations: SimStation, peers_accept: bool = True) -> None:
         self.stations = {s.station_id: s for s in stations}
@@ -101,6 +101,8 @@ class SimulatedEconomy:
         self.advertisements: list[Advertisement] = []
         self.peers_accept = peers_accept
         self._ids = itertools.count(1)
+        self.command_counts: dict[str, int] = {}
+        self.rejections: list[tuple[str, str]] = []
 
     # --- snapshot construction -------------------------------------------
 
@@ -138,9 +140,9 @@ class SimulatedEconomy:
                 upkeep_per_tick=UPKEEP,
                 specialty=station.specialty,
             ),
-            offers=tuple(self.offers),
+            offers=tuple(o for o in self.offers if station_id in (o.proposer_id, o.recipient_id)),
             advertisements=tuple(self.advertisements),
-            transactions=tuple(self.transactions),
+            transactions=tuple(t for t in self.transactions if station_id in (t.proposer_id, t.recipient_id)),
             request_results=(),
             outcome=None,
         )
@@ -149,15 +151,45 @@ class SimulatedEconomy:
 
     def apply(self, station_id: str, actions) -> None:
         for action in actions:
+            reason = self.rejection_reason(station_id, action)
+            if reason:
+                self.rejections.append((station_id, reason))
+                continue
+            self.command_counts[station_id] = self.command_counts.get(station_id, 0) + 1
             if isinstance(action, AdvertiseAction):
                 self._advertise(station_id, action)
             elif isinstance(action, OfferAction):
                 self._post_offer(station_id, action)
             elif isinstance(action, AcceptAction):
-                self._accept(station_id, action.offer_id)
+                if not self._accept(station_id, action.offer_id):
+                    self.rejections.append((station_id, "ACCEPT_REJECTED"))
             elif isinstance(action, WithdrawAction):
                 self._withdraw(action.object_id)
         self.world_version += 1
+
+    def rejection_reason(self, station_id, action):
+        station = self.stations[station_id]
+        if station.failed_once:
+            return "STATION_FAILED"
+        if self.tick >= RULES.duration_ticks:
+            return "RUN_NOT_RUNNING"
+        if self.command_counts.get(station_id, 0) >= RULES.new_commands_per_station_per_tick:
+            return "RATE_LIMITED"
+        if isinstance(action, (OfferAction, AdvertiseAction)):
+            ttl = (RULES.max_offer_ttl_ticks if isinstance(action, OfferAction)
+                   else RULES.max_publication_ttl_ticks)
+            if not self.tick < action.expires_tick <= min(self.tick + ttl, RULES.duration_ticks):
+                return "INVALID_ARGUMENT"
+        if isinstance(action, OfferAction):
+            if self.stations[action.recipient_id].failed_once:
+                return "STATION_FAILED"
+            if not station.inventory.dominates(action.give):
+                return "INSUFFICIENT_RESOURCES"
+            count = sum(o.proposer_id == station_id and o.status is OfferStatus.OPEN
+                        for o in self.offers)
+            if count >= RULES.max_open_outgoing_offers:
+                return "LIMIT_REACHED"
+        return None
 
     def _advertise(self, station_id: str, action: AdvertiseAction) -> None:
         self.advertisements = [a for a in self.advertisements if a.station_id != station_id]
@@ -224,11 +256,15 @@ class SimulatedEconomy:
         offer = next((o for o in self.offers if o.offer_id == offer_id), None)
         if offer is None or offer.status is not OfferStatus.OPEN:
             return False
+        if offer.is_expired_at(self.tick):
+            return False
         if offer.recipient_id != accepting_id:
             return False
 
         proposer = self.stations[offer.proposer_id]
         recipient = self.stations[offer.recipient_id]
+        if proposer.failed_once or recipient.failed_once:
+            return False
         if not proposer.inventory.dominates(offer.give):
             return False
         if not recipient.inventory.dominates(offer.receive):
@@ -264,6 +300,7 @@ class SimulatedEconomy:
 
     def advance_tick(self) -> None:
         self.tick += 1
+        self.command_counts.clear()
         self.world_version += 1
         self.offers = [
             (o if not (o.status is OfferStatus.OPEN and o.expires_tick <= self.tick)
@@ -273,6 +310,13 @@ class SimulatedEconomy:
         self.advertisements = [a for a in self.advertisements if a.expires_tick > self.tick]
         for station in self.stations.values():
             station.settle_tick()
+        failed = {s.station_id for s in self.stations.values() if s.failed_once}
+        self.advertisements = [a for a in self.advertisements if a.station_id not in failed]
+        for offer in list(self.offers):
+            if offer.status is OfferStatus.OPEN and failed.intersection(
+                (offer.proposer_id, offer.recipient_id)
+            ):
+                self._close(offer.offer_id, OfferStatus.WITHDRAWN)
 
 
 def build_economy(**overrides) -> SimulatedEconomy:
@@ -300,7 +344,7 @@ class SimulatedClients:
         for station_id in self.economy.stations:
             if station_id not in self.trading:
                 continue
-            if self.economy.stations[station_id].health == 0:
+            if self.economy.stations[station_id].failed_once:
                 continue
             observation = self.economy.observation_for(station_id)
             decision, self.memories[station_id] = decide(
@@ -415,3 +459,61 @@ def test_the_planet_survives_across_production_levels(production):
     run_simulation(economy, ticks=30)
 
     assert economy.stations[US].health > 0
+
+
+@pytest.mark.parametrize("disrupted", [False, True])
+def test_nine_planets_with_different_response_times_and_variable_production(disrupted):
+    economy = SimulatedEconomy(*(
+        SimStation(f"P{i + 1:02}", list(Resource)[i % 3], Bundle(12, 12, 12), production=4)
+        for i in range(9)
+    ))
+    clients = SimulatedClients(economy)
+    for tick in range(60):
+        for i, station in enumerate(economy.stations.values()):
+            # Production is a schedule, not a promised constant. Two peers have
+            # multi-tick outages; patient peers only accept every second tick.
+            station.production = 2 if disrupted and (tick + i) % 11 < 3 else 4
+            if disrupted and i in (2, 5) and 12 <= tick < 16:
+                continue
+            observation = economy.observation_for(station.station_id)
+            decision, clients.memories[station.station_id] = decide(
+                observation, clients.memories[station.station_id],
+                clients.commitments[station.station_id],
+            )
+            actions = decision.actions
+            if disrupted and i % 3 == 1 and tick % 2:
+                actions = [a for a in actions if not isinstance(a, AcceptAction)]
+            economy.apply(station.station_id, actions)
+            promised = sum_bundles(
+                o.give for o in economy.offers
+                if o.proposer_id == station.station_id and o.status is OfferStatus.OPEN
+            )
+            assert station.inventory.dominates(promised)
+        economy.advance_tick()
+    assert all(not s.failed_once for s in economy.stations.values())
+    assert all(s.imported.total() > 0 for s in economy.stations.values())
+    assert not economy.rejections
+
+
+def sum_bundles(bundles):
+    total = Bundle.zero()
+    for bundle in bundles:
+        total += bundle
+    return total
+
+
+def test_simulator_rejects_expired_and_unaffordable_acceptances_atomically():
+    economy = build_economy()
+    economy.apply(US, [OfferAction("P02", Bundle(water=4), Bundle(food=4), 2)])
+    offer_id = economy.offers[-1].offer_id
+    economy.stations["P02"].inventory = Bundle.zero()
+    before = {sid: s.inventory for sid, s in economy.stations.items()}
+    economy.apply("P02", [AcceptAction(offer_id)])
+    assert {sid: s.inventory for sid, s in economy.stations.items()} == before
+    assert economy.offers[-1].status is OfferStatus.OPEN
+    economy.advance_tick()
+    economy.advance_tick()
+    before = {sid: s.inventory for sid, s in economy.stations.items()}
+    economy.apply("P02", [AcceptAction(offer_id)])
+    assert {sid: s.inventory for sid, s in economy.stations.items()} == before
+    assert len(economy.rejections) == 2

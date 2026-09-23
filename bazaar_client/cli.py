@@ -122,7 +122,8 @@ async def run(config: ClientConfig) -> int:
 
         logger.info("--- one advertise command ---")
         request_id = session.request_ids.next("advertise")
-        expires_tick = snapshot.tick + min(6, snapshot.rules.max_publication_ttl_ticks)
+        expires_tick = snapshot.tick + min(6, snapshot.rules.max_publication_ttl_ticks,
+                                            snapshot.rules.duration_ticks - snapshot.tick)
         message = mappers.build_advertise(
             session.run_id,
             request_id,

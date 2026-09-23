@@ -235,9 +235,7 @@ def test_recovered_health_does_not_undo_a_failure():
         PolicyMemory(),
     )
 
-    # failed_once with health above zero still trades: the failure flag alone
-    # does not disable us, only a current zero-health state does.
-    assert decision.actions
+    assert decision.actions == []
 
 
 def test_a_finished_run_stops_new_trading_actions():

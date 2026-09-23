@@ -21,6 +21,7 @@ PRODUCTION_SAMPLES = 8
 class PolicyMemory:
     """Rolling estimates. `observe` folds each new snapshot in."""
 
+    run_id: str | None = None
     counterparties: CounterpartyModel = field(default_factory=CounterpartyModel)
     round_trips: deque[int] = field(default_factory=lambda: deque(maxlen=ROUND_TRIP_SAMPLES))
     productions: deque[int] = field(default_factory=lambda: deque(maxlen=PRODUCTION_SAMPLES))

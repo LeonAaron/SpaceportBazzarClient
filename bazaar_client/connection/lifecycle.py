@@ -142,6 +142,8 @@ class SessionLifecycle:
                 "discard pending commands and object ids"
             )
 
+        if snapshot.snapshot_sequence <= self._last_snapshot_sequence:
+            return None
         self._run_id = snapshot.run_id
         self._phase = snapshot.phase
         self._last_snapshot_sequence = max(

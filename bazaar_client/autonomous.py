@@ -15,10 +15,12 @@ from pathlib import Path
 
 from bazaar_client.app import (
     BazaarSession,
+    CommandBlockedError,
     CommandOutcome,
     SessionAbortedError,
     SessionClosedError,
 )
+from bazaar_client.connection.throttle import CommandThrottle
 from bazaar_client.connection.ws_client import SubprotocolNotSelected
 from bazaar_client.config import ClientConfig
 from bazaar_client.domain.types import Phase, ResultCode, Snapshot
@@ -80,6 +82,9 @@ class TradingLoop:
     async def run(self, max_decisions: int | None = None) -> TradingStats:
         """Trade until the run ends, the connection drops, or a decision cap is hit."""
         snapshot, ack = await self._session.handshake()
+        if self._memory.run_id is not None and self._memory.run_id != snapshot.run_id:
+            raise SessionAbortedError("run changed on reconnect; restart with fresh policy memory")
+        self._memory.run_id = snapshot.run_id
         logger.info(
             "ready as %s: specialty %s, upkeep %s, %d planets in the directory",
             snapshot.self_station_id,
@@ -110,8 +115,14 @@ class TradingLoop:
         return self.stats
 
     async def step(self, snapshot: Snapshot) -> Decision:
-        """One observe-decide-act cycle against a single snapshot."""
-        decision, self._memory = decide(snapshot, self._memory, self._commitments)
+        """Choose one action, then wait for its authoritative confirmation."""
+        latest = self._session.latest_snapshot
+        if latest is not None and latest.snapshot_sequence > snapshot.snapshot_sequence:
+            snapshot = latest
+        decision, self._memory = decide(
+            snapshot, self._memory, self._commitments,
+            command_budget=min(1, self._session.remaining_command_budget),
+        )
         self.stats.decisions += 1
         self._log_decision(snapshot, decision)
 
@@ -121,11 +132,11 @@ class TradingLoop:
                 outcome = await self._executor.execute(
                     action, request_id, step=f"tick-{snapshot.tick}"
                 )
-            except (SessionClosedError, asyncio.TimeoutError) as exc:
-                logger.warning("command %s did not complete: %s", request_id, exc)
+            except CommandBlockedError as exc:
+                logger.info("command %s deferred: %s", request_id, exc)
                 break
             self._record(action, outcome)
-            self._executor.confirm(self._session.latest_snapshot)
+            self.stats.final_snapshot = self._session.latest_snapshot
 
         return decision
 
@@ -213,11 +224,12 @@ async def run_trading(
     memory = PolicyMemory()
     evidence = EvidenceLog(evidence_path)
     attempt = 0
+    throttle = CommandThrottle(limit_per_tick=1)
 
     while max_attempts is None or attempt < max_attempts:
         attempt += 1
         try:
-            async with BazaarSession(config) as session:
+            async with BazaarSession(config, throttle=throttle) as session:
                 loop = TradingLoop(
                     session, memory=memory, stats=stats, evidence=evidence
                 )

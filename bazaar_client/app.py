@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass
 
 from bazaar_client.codec.wire import encode_client_message
@@ -48,6 +49,10 @@ class SessionClosedError(RuntimeError):
     """Raised when the session ended before an awaited answer arrived."""
 
 
+class CommandBlockedError(RuntimeError):
+    """Local readiness, phase, failure or quota checks prevented transmission."""
+
+
 class SessionAbortedError(RuntimeError):
     """Raised on a control error that retrying cannot fix."""
 
@@ -76,12 +81,15 @@ class CommandOutcome:
 class BazaarSession:
     """One connection's worth of state: snapshots in, commands out."""
 
-    def __init__(self, config: ClientConfig, connection: BazaarConnection | None = None) -> None:
+    def __init__(
+        self, config: ClientConfig, connection: BazaarConnection | None = None,
+        throttle: CommandThrottle | None = None,
+    ) -> None:
         self._config = config
         self._connection = connection or BazaarConnection(config)
         self._lifecycle = SessionLifecycle()
         self._tracker = PendingRequestTracker()
-        self._throttle = CommandThrottle(limit_per_tick=1)
+        self._throttle = throttle or CommandThrottle(limit_per_tick=1)
         self._ids: RequestIdGenerator | None = None
 
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -212,7 +220,7 @@ class BazaarSession:
                 del self._by_sequence[stale]
         self._throttle.update_limit(snapshot.rules.new_commands_per_station_per_tick)
         if self._ids is None:
-            self._ids = RequestIdGenerator(snapshot.self_station_id)
+            self._ids = RequestIdGenerator(snapshot.self_station_id, prefix=uuid.uuid4().hex[:12])
 
         still_waiting = []
         for target, future in self._snapshot_waiters:
@@ -221,6 +229,9 @@ class BazaarSession:
             elif not future.done():
                 still_waiting.append((target, future))
         self._snapshot_waiters = still_waiting
+        # Snapshots can recover results whose standalone message was lost.
+        for result in snapshot.request_results:
+            self._on_result(result)
 
     def _on_result(self, result: CommandResult) -> None:
         self._tracker.resolve(result.request_id)
@@ -300,7 +311,32 @@ class BazaarSession:
 
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._snapshot_waiters.append((min_sequence, future))
-        return await asyncio.wait_for(future, timeout)
+        try:
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._snapshot_waiters = [(seq, f) for seq, f in self._snapshot_waiters if f is not future]
+
+    async def wait_for_result_snapshot(self, result: CommandResult, timeout: float = 15.0) -> Snapshot:
+        """Wait for authoritative state containing this exact command outcome.
+
+        World version alone is insufficient: a rejected command can add a result
+        without changing it. The result may also arrive after its snapshot.
+        """
+        async with asyncio.timeout(timeout):
+            sequence = 1
+            while True:
+                snapshot = await self.wait_for_snapshot(sequence, timeout)
+                if result in snapshot.request_results:
+                    return snapshot
+                sequence = snapshot.snapshot_sequence + 1
+
+    @property
+    def remaining_command_budget(self) -> int:
+        snapshot = self._latest
+        if (snapshot is None or not self._lifecycle.can_send_trading_commands()
+                or snapshot.me.failed_once or snapshot.tick >= snapshot.rules.duration_ticks):
+            return 0
+        return self._throttle.remaining(snapshot.tick)
 
     async def wait_for_sequence(self, sequence: int, timeout: float = 15.0) -> Snapshot:
         """Return the snapshot with exactly this sequence number.
@@ -347,21 +383,35 @@ class BazaarSession:
         payload = encode_client_message(message, max_bytes=max_bytes)
         fingerprint = body_fingerprint(payload)
         retry = self._tracker.is_exact_retry(request_id, fingerprint)
+        if request_id in self._command_waiters:
+            raise CommandBlockedError("this request already has a pending send")
+        if (not self._lifecycle.can_send_trading_commands() or snapshot is None
+                or snapshot.me.failed_once or snapshot.tick >= snapshot.rules.duration_ticks):
+            raise CommandBlockedError("trading is not eligible")
+        if not retry and self.remaining_command_budget <= 0:
+            raise CommandBlockedError("this tick's command budget is exhausted")
+        # Register only after eligibility checks, so a blocked first send cannot
+        # subsequently masquerade as an exact retry.
         self._tracker.register(request_id, fingerprint, kind, tick)
 
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._command_waiters[request_id] = future
 
+        # Charge before yielding so simultaneous senders cannot take one slot.
+        if not retry:
+            self._throttle.record_sent(tick)
         try:
             await self._connection.send_payload(payload)
         except Exception:
             self._command_waiters.pop(request_id, None)
             raise
 
-        self._throttle.record_sent(tick)
         logger.info(
             "sent %s request_id=%s (%d bytes)%s",
             kind, request_id, len(payload), " [exact retry]" if retry else "",
         )
 
-        return await asyncio.wait_for(future, timeout)
+        try:
+            return await asyncio.wait_for(future, timeout)
+        finally:
+            self._command_waiters.pop(request_id, None)

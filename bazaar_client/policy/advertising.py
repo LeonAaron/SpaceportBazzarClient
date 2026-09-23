@@ -35,7 +35,9 @@ def decide_advertisement(
 ) -> AdvertiseDecision:
     selling = frozenset(r for r in Resource if surplus.get(r) >= MIN_LISTABLE_QTY)
     seeking = frozenset(r for r in Resource if deficit.get(r) > 0 or r in critical)
-    ttl = min(DEFAULT_AD_TTL, rules.max_publication_ttl_ticks)
+    ttl = min(DEFAULT_AD_TTL, rules.max_publication_ttl_ticks, rules.duration_ticks - tick)
+    if ttl <= 0:
+        return AdvertiseDecision(None, "no publication lifetime remains")
     proposed = AdvertiseAction(selling, seeking, tick + ttl)
 
     if current is None:

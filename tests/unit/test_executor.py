@@ -45,6 +45,12 @@ class FakeSession:
             request_id, result=factories.make_result(request_id=request_id)
         )
 
+    async def wait_for_result_snapshot(self, result, timeout=15.0):
+        self.latest_snapshot = factories.make_snapshot(
+            snapshot_sequence=4, world_version=5, request_results=(result,)
+        )
+        return self.latest_snapshot
+
     async def send_sync(self):
         self.sent.append(("sync", None, None))
 
@@ -104,7 +110,7 @@ async def test_an_offers_stock_is_held_while_it_is_in_flight():
     assert seen == [Bundle(water=2)]
 
 
-async def test_the_hold_is_released_once_the_answer_arrives():
+async def test_the_hold_is_released_once_the_confirming_snapshot_arrives():
     executor, _, _, commitments, _ = make_executor()
 
     await executor.execute(OFFER, "req-1")
@@ -112,14 +118,14 @@ async def test_the_hold_is_released_once_the_answer_arrives():
     assert commitments.inflight_total == Bundle.zero()
 
 
-async def test_a_failed_send_does_not_leave_stock_reserved_forever():
-    """A timed-out offer must not permanently shrink what we can promise."""
+async def test_a_timed_out_send_keeps_stock_reserved_until_reconnect():
+    """The server may have accepted an offer whose answer was lost."""
     executor, _, _, commitments, _ = make_executor(FakeSession(error=asyncio.TimeoutError()))
 
     with pytest.raises(asyncio.TimeoutError):
         await executor.execute(OFFER, "req-1")
 
-    assert commitments.inflight_total == Bundle.zero()
+    assert commitments.inflight_total == OFFER.give
 
 
 async def test_a_failed_send_still_leaves_evidence_of_the_attempt():

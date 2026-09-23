@@ -44,7 +44,7 @@ once, in `domain/types.py`, rather than everywhere:
 ## The decision API
 
 ```python
-decide(observation: Snapshot, memory: PolicyMemory, commitments) -> (Decision, PolicyMemory)
+decide(observation: Snapshot, memory: PolicyMemory, commitments, *, command_budget=None) -> (Decision, PolicyMemory)
 ```
 
 A pure function: no socket, no protobuf, no clock. Every situation in
@@ -85,8 +85,10 @@ of our own settled offers), and deepens when health is low or when our own
 specialty's output has dipped. Capped so a jittery market cannot make us hoard.
 
 **Stock is `available_to_commit`, not inventory.** Inventory minus what open
-offers already promise, minus what is in flight. This is the direct answer to
-having no escrow.
+offers already promise, minus what is in flight. Within a proposed batch,
+acceptance costs and new offers share one spending balance; unconfirmed gains
+and withdrawals do not free stock for subsequent actions. Gifts use only the
+surplus and offer slots left after those actions.
 
 **Urgency.** `CRITICAL` when uncommitted stock cannot cover the next upkeep,
 `WATCH` below reserve, else `NONE`.
@@ -124,6 +126,24 @@ price. A planet kept alive also stays a trading partner. The caps make the
 downside bounded: only when nothing of ours is urgent, only from surplus above
 reserve, at most 20% of it, one gift per tick, with a per-station cooldown.
 
+## Execution and confirmation
+
+The autonomous loop requests at most one action at a time, using the remaining
+command quota for the current tick. It waits for a snapshot containing that
+command's exact result before making another decision from the newest state.
+A result alone does not release a successful offer's in-flight commitment or
+count an earlier snapshot as evidence of its outcome. Rejections release the
+hold; an ambiguous timeout retains it and triggers reconnection. Snapshots can
+also recover results whose standalone messages were lost.
+
+The sending boundary enforces readiness, RUNNING phase, permanent failure, run
+duration, and the per-tick quota. Multiple snapshots do not replenish that quota;
+exact request retries do not spend another new-command slot. Reconnects retain
+the quota and policy memory, generate fresh request IDs, and repeat readiness.
+A different run ID stops the loop so old policy memory cannot enter a new run.
+Old snapshots cannot change the current phase. Offer and advertisement deadlines
+are capped by both TTL and the run's duration.
+
 ## Testing
 
 | Area | Where |
@@ -132,7 +152,8 @@ reserve, at most 20% of it, one gift per tick, with a per-station cooldown.
 | Lifecycle | `tests/wire/test_lifecycle.py` — handshake, phase gating, control codes, reconnect |
 | State handling | `tests/state_handling/` — duplicate and out-of-order snapshots, commitments, counterparty inference |
 | Policy | `tests/unit/test_policy_*.py`, `test_decide_compose.py` — each rule, then the composed decision |
-| Survival | `tests/survival/` — shortage, production dips, failure, and a multi-tick simulated economy |
+| Survival | `tests/survival/` — shortage, production dips, permanent failure, three- and nine-planet economies, delayed acceptances and temporary outages |
+| Execution safety | `tests/unit/test_trading_safety.py` — send gates, same-tick quotas, delayed/missing results, confirmation, reconnects, and the full trading loop |
 | End to end | `tests/integration/` — the real practice server, ten scripted steps |
 
 **What the practice server can and cannot prove.** It runs one fixed script, so
@@ -143,12 +164,15 @@ defect. The policy is therefore covered by unit tests on synthetic snapshots and
 by `tests/survival/test_simulated_run.py`, which models the economy the field
 manual describes and runs this same `decide` for every planet in it.
 
-That simulation is a model, not the real game: counterparty behaviour is this
-policy rather than eight other teams', and settlement is simulated. It shows the
+These simulations are models, not the real game: nine-planet scenarios vary
+response timing and connectivity, but counterparties still derive their terms
+from this policy. Settlement and server limits are simulated. It shows the
 policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
-**Coverage** is 93% over handwritten code. The generated `bazaar_pb2.py` is
-excluded (its correctness is covered by the round-trip tests instead), and
-`ws_client.py` sits lower than the rest because its socket I/O is exercised by
-the live integration run rather than by mocks.
+**Coverage** is 94% combined statement/branch coverage over handwritten code
+from all 420 tests, including the practice-server integration tests (`make cov`).
+The generated `bazaar_pb2.py` is excluded (its correctness is covered by the round-trip tests instead), and
+remaining gaps include transport failure paths and supervisor/CLI branches.
+The live integration tests exercise the real socket and scripted exchange, but
+an autonomous classroom run with independently written peers remains necessary.

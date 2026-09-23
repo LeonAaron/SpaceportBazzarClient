@@ -71,6 +71,8 @@ def decide(
     observation: Snapshot,
     memory: PolicyMemory,
     commitments: CommitmentTracker | None = None,
+    *,
+    command_budget: int | None = None,
 ) -> tuple[Decision, PolicyMemory]:
     memory = memory.observe(observation)
     commitments = commitments or CommitmentTracker()
@@ -94,7 +96,7 @@ def decide(
         decision.reasons.append(f"phase is {observation.phase.name}; no trading actions")
         return decision, memory
 
-    if observation.me.failed_once and observation.me.health == 0:
+    if observation.me.failed_once:
         decision.reasons.append("station has failed permanently; trading is disabled")
         return decision, memory
 
@@ -104,15 +106,29 @@ def decide(
         )
         return decision, memory
 
-    budget = observation.rules.new_commands_per_station_per_tick
+    if observation.tick >= observation.rules.duration_ticks:
+        decision.reasons.append("run duration reached; no trading actions")
+        return decision, memory
 
-    budget = _accept_incoming(decision, observation, available, reserve, urgency, budget)
+    budget = observation.rules.new_commands_per_station_per_tick
+    if command_budget is not None:
+        budget = min(budget, max(0, command_budget))
+
+    budget, available = _accept_incoming(
+        decision, observation, available, reserve, urgency, budget
+    )
+    # Spend from one shared balance throughout the proposed batch. Accepted
+    # gains are not spendable until confirmed by the server.
+    surplus = surplus_above_reserve(available, reserve)
+    deficit = deficit_below_reserve(available, reserve)
+    urgency = compute_urgency(available, observation.me.upkeep_per_tick, reserve)
+    critical = frozenset(r for r, level in urgency.items() if level is Urgency.CRITICAL)
     budget = _withdraw_dangerous(decision, observation, urgency, budget)
     budget = _refresh_advertisement(
         decision, observation, surplus, deficit, critical, budget
     )
-    budget = _propose_offers(
-        decision, observation, memory, surplus, deficit, urgency, budget
+    budget, surplus = _propose_offers(
+        decision, observation, memory, available, surplus, deficit, urgency, budget
     )
     _offer_aid(decision, observation, memory, surplus, urgency, budget)
 
@@ -134,8 +150,9 @@ def _accept_incoming(decision, observation, available, reserve, urgency, budget)
         budget -= 1
         running = running.saturating_sub(
             offer.what_station_pays(observation.self_station_id)
-        ) + offer.what_station_receives(observation.self_station_id)
-    return budget
+        )
+        urgency = compute_urgency(running, observation.me.upkeep_per_tick, reserve)
+    return budget, running
 
 
 def _withdraw_dangerous(decision, observation, urgency, budget):
@@ -192,12 +209,12 @@ def _wanted_quantities(observation, available, reserve, deficit) -> dict[Resourc
     return wanted
 
 
-def _propose_offers(decision, observation, memory, surplus, deficit, urgency, budget):
+def _propose_offers(decision, observation, memory, available, surplus, deficit, urgency, budget):
     open_outgoing = observation.outgoing_open_offers()
     room = observation.rules.max_open_outgoing_offers - len(open_outgoing)
     if room <= 0:
         decision.reasons.append("outgoing offer limit reached")
-        return budget
+        return budget, surplus
 
     # An offer already standing for this pairing still promises that stock.
     pending = frozenset(
@@ -208,7 +225,7 @@ def _propose_offers(decision, observation, memory, surplus, deficit, urgency, bu
     )
 
     wanted = _wanted_quantities(
-        observation, decision.available, decision.reserve, deficit
+        observation, available, decision.reserve, deficit
     )
 
     running_surplus = surplus
@@ -233,7 +250,10 @@ def _propose_offers(decision, observation, memory, surplus, deficit, urgency, bu
         except CannotAfford:
             continue
 
-        ttl = min(OFFER_TTL, observation.rules.max_offer_ttl_ticks)
+        ttl = min(OFFER_TTL, observation.rules.max_offer_ttl_ticks,
+                  observation.rules.duration_ticks - observation.tick)
+        if ttl <= 0:
+            break
         decision.add(
             OfferAction(candidate.station_id, give, receive, observation.tick + ttl),
             f"offer {give.total()} {candidate.give.name} for {receive.total()} "
@@ -242,18 +262,23 @@ def _propose_offers(decision, observation, memory, surplus, deficit, urgency, bu
         running_surplus = running_surplus.saturating_sub(give)
         budget -= 1
         room -= 1
-    return budget
+    return budget, running_surplus
 
 
 def _offer_aid(decision, observation, memory, surplus, urgency, budget):
-    if budget <= 0:
+    planned_offers = sum(isinstance(a, OfferAction) for a in decision.actions)
+    if (budget <= 0 or len(observation.outgoing_open_offers()) + planned_offers
+            >= observation.rules.max_open_outgoing_offers):
         return
     for gift in scan_for_distress(
         memory.counterparties, surplus, urgency, observation.tick, memory
     ):
         if budget <= 0:
             break
-        ttl = min(OFFER_TTL, observation.rules.max_offer_ttl_ticks)
+        ttl = min(OFFER_TTL, observation.rules.max_offer_ttl_ticks,
+                  observation.rules.duration_ticks - observation.tick)
+        if ttl <= 0:
+            break
         decision.add(
             OfferAction(
                 gift.station_id,

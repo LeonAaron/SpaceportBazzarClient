@@ -27,8 +27,7 @@ class CommitmentTracker:
         self._inflight[request_id] = give
 
     def resolve_inflight(self, request_id: str) -> None:
-        """Called on any answer: accepted offers appear in the next snapshot,
-        and rejected ones never reserved anything."""
+        """Release after rejection or an authoritative confirming snapshot."""
         self._inflight.pop(request_id, None)
 
     def clear_inflight(self) -> None:
