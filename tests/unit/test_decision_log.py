@@ -40,9 +40,8 @@ def test_a_decision_record_explains_what_was_seen_and_chosen(tmp_path):
     assert record["kind"] == "decision"
     assert record["tick"] == snapshot.tick
     assert record["inventory"] == {"water": 40, "food": 2, "components": 30}
-    assert record["import_targets"]["water"] == 0
-    assert record["import_targets"]["food"] > 0
-    assert record["specialty_spendable"] == decision.spendable
+    assert record["reserve"] == decision.reserve.as_dict()
+    assert record["surplus"] == decision.surplus.as_dict()
     assert [a["kind"] for a in record["actions"]] == [a.kind for a in decision.actions]
     assert record["reasons"] == decision.reasons
 

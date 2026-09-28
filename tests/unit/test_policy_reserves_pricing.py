@@ -7,23 +7,21 @@ import pytest
 from bazaar_client.domain.types import Bundle, Resource
 from bazaar_client.policy.memory import PolicyMemory
 from bazaar_client.policy.pricing import (
-    TRADE_SIZE_MAX,
+    MAX_PREMIUM_RATIO,
+    MAX_TRADE_SIZE,
     CannotAfford,
     compute_terms,
-    size_trade,
+    desired_quantity,
+    premium_for,
 )
 from bazaar_client.policy.reserves import (
     MAX_SAFETY_TICKS,
     MIN_SAFETY_TICKS,
     Urgency,
     compute_reserve,
-    IMPORT_TARGET_MAX_TICKS,
-    IMPORT_TARGET_MIN_TICKS,
     compute_urgency,
     deficit_below_reserve,
-    import_target,
     safety_ticks,
-    specialty_spendable,
     surplus_above_reserve,
 )
 from tests.fixtures import factories
@@ -107,14 +105,14 @@ def test_urgency_is_critical_when_the_next_upkeep_is_not_covered():
     assert urgency[Resource.WATER] is Urgency.CRITICAL
 
 
-def test_urgency_is_watch_between_upkeep_and_reserve():
-    urgency = compute_urgency(Bundle(2, 5, 5), Bundle(1, 1, 1), Bundle(3, 3, 3))
+def test_urgency_is_watch_between_ten_and_twenty():
+    urgency = compute_urgency(Bundle(10, 30, 30), Bundle(1, 1, 1), Bundle(3, 3, 3))
 
     assert urgency[Resource.WATER] is Urgency.WATCH
 
 
-def test_urgency_is_none_at_or_above_reserve():
-    urgency = compute_urgency(Bundle(3, 3, 3), Bundle(1, 1, 1), Bundle(3, 3, 3))
+def test_urgency_is_none_at_twenty_or_above():
+    urgency = compute_urgency(Bundle(20, 20, 20), Bundle(1, 1, 1), Bundle(3, 3, 3))
 
     assert all(level is Urgency.NONE for level in urgency.values())
 
@@ -124,83 +122,130 @@ def test_surplus_and_deficit_are_measured_against_the_reserve():
     assert deficit_below_reserve(Bundle(10, 1, 3), Bundle(3, 3, 3)) == Bundle(0, 2, 0)
 
 
-# --- import targets -------------------------------------------------------
-
-
-def test_imports_are_held_to_a_deep_target_and_our_specialty_to_none():
-    station = factories.make_station(specialty=Resource.WATER)
-    target = import_target(station, reserve=Bundle(3, 3, 3), ticks_remaining=100)
-
-    assert target.water == 0
-    assert target.food == IMPORT_TARGET_MAX_TICKS
-    assert target.components == IMPORT_TARGET_MAX_TICKS
-
-
-@pytest.mark.parametrize(
-    "remaining, expected",
-    [(120, IMPORT_TARGET_MAX_TICKS), (45, 45), (5, IMPORT_TARGET_MIN_TICKS)],
-)
-def test_the_import_target_covers_the_rest_of_the_run_within_bounds(remaining, expected):
-    """Enough to outlast partners going quiet, without hoarding past the cap."""
-    station = factories.make_station(specialty=Resource.WATER)
-
-    assert import_target(station, Bundle(3, 3, 3), ticks_remaining=remaining).food == expected
-
-
-def test_the_import_target_never_falls_below_the_reserve():
-    station = factories.make_station(specialty=Resource.WATER)
-
-    assert import_target(station, reserve=Bundle(3, 99, 3), ticks_remaining=100).food == 99
-
-
-def test_spendable_specialty_is_what_lies_above_its_reserve():
-    assert specialty_spendable(Bundle(water=10), Bundle(3, 3, 3), Resource.WATER) == 7
-    assert specialty_spendable(Bundle(water=2), Bundle(3, 3, 3), Resource.WATER) == 0
-
-
 # --- pricing --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("want_qty", [1, 3, 7, 20, 50])
-@pytest.mark.parametrize("spendable", [1, 5, 20, 99])
-def test_every_trade_is_exactly_one_for_one(want_qty, spendable):
-    """No resource is worth more than another, so we never pay more than we get."""
-    give, receive = compute_terms(Resource.FOOD, want_qty, Resource.WATER, spendable)
+def test_the_baseline_price_is_one_for_one():
+    """Every planet consumes all three resources, so parity is the neutral price."""
+    give, receive = compute_terms(
+        Resource.FOOD, 2, Resource.WATER, Bundle(water=10), Urgency.NONE
+    )
 
-    assert give.total() == receive.total()
-    assert give == Bundle(water=give.total())
-    assert receive == Bundle(food=receive.total())
-
-
-def test_a_trade_covers_the_whole_need_in_one_settlement():
-    give, receive = compute_terms(Resource.FOOD, 15, Resource.WATER, spendable=40)
-
-    assert give == Bundle(water=15)
-    assert receive == Bundle(food=15)
+    assert give == Bundle(water=2)
+    assert receive == Bundle(food=2)
 
 
-def test_a_trade_is_capped_at_the_maximum_size():
-    assert size_trade(want_qty=100, spendable=100) == TRADE_SIZE_MAX
+def test_urgency_sweetens_our_side_to_buy_speed():
+    give, receive = compute_terms(
+        Resource.FOOD, 2, Resource.WATER, Bundle(water=10), Urgency.CRITICAL
+    )
+
+    assert receive == Bundle(food=2)
+    assert give.water == 4  # 2 * 2
 
 
-def test_a_trade_is_scaled_down_to_what_we_can_pay_and_stays_one_for_one():
+@pytest.mark.parametrize("urgency", list(Urgency))
+def test_the_premium_never_exceeds_the_cap(urgency):
+    assert premium_for(urgency) <= MAX_PREMIUM_RATIO
+
+
+@pytest.mark.parametrize("want_qty", range(1, 9))
+@pytest.mark.parametrize("urgency", list(Urgency))
+def test_the_effective_rate_never_exceeds_the_cap(want_qty, urgency):
+    """Rounding must not push the real price past the declared ceiling."""
+    give, receive = compute_terms(
+        Resource.FOOD, want_qty, Resource.WATER, Bundle(water=99), urgency
+    )
+
+    assert give.total() / receive.total() <= MAX_PREMIUM_RATIO
+
+
+@pytest.mark.parametrize("want_qty", range(1, 9))
+def test_a_more_urgent_need_never_pays_less_per_unit(want_qty):
+    """Urgency buys speed, so it must not round out to a cheaper rate."""
+
+    def rate(urgency):
+        give, receive = compute_terms(
+            Resource.FOOD, want_qty, Resource.WATER, Bundle(water=99), urgency
+        )
+        return give.total() / receive.total()
+
+    assert rate(Urgency.CRITICAL) >= rate(Urgency.WATCH) >= rate(Urgency.NONE)
+
+
+def test_a_calm_single_unit_trade_is_not_rounded_up_to_double():
+    """Ceiling a one-unit trade would pay a 100% premium for no urgency at all."""
+    give, receive = compute_terms(
+        Resource.FOOD, 1, Resource.WATER, Bundle(water=10), Urgency.WATCH
+    )
+
+    assert give.total() / receive.total() < MAX_PREMIUM_RATIO
+
+
+def test_an_unaffordable_trade_is_scaled_down_rather_than_overpromised():
     """Posting locks nothing, so an offer must still be payable when accepted."""
-    give, receive = compute_terms(Resource.FOOD, 12, Resource.WATER, spendable=5)
+    give, receive = compute_terms(
+        Resource.FOOD, 4, Resource.WATER, Bundle(water=2), Urgency.NONE
+    )
 
-    assert give == Bundle(water=5)
-    assert receive == Bundle(food=5)
+    assert give == Bundle(water=2)
+    assert receive == Bundle(food=2)
 
 
-def test_offering_when_nothing_is_spendable_is_refused():
+def test_offering_a_resource_we_have_none_of_is_refused():
     with pytest.raises(CannotAfford):
-        compute_terms(Resource.FOOD, 2, Resource.WATER, spendable=0)
+        compute_terms(Resource.FOOD, 2, Resource.WATER, Bundle.zero(), Urgency.NONE)
 
 
 def test_the_same_resource_may_not_appear_on_both_sides():
     with pytest.raises(CannotAfford, match="both sides"):
-        compute_terms(Resource.WATER, 2, Resource.WATER, spendable=9)
+        compute_terms(Resource.WATER, 2, Resource.WATER, Bundle(water=9), Urgency.NONE)
 
 
 def test_asking_for_nothing_is_refused():
     with pytest.raises(CannotAfford):
-        compute_terms(Resource.FOOD, 0, Resource.WATER, spendable=9)
+        compute_terms(Resource.FOOD, 0, Resource.WATER, Bundle(water=9), Urgency.NONE)
+
+
+def test_trade_sizes_stay_small_so_one_failure_strands_little():
+    assert desired_quantity(100) == MAX_TRADE_SIZE
+    assert desired_quantity(1) == 1
+    assert desired_quantity(0) == 1
+
+
+@pytest.mark.parametrize("stock, expected", [
+    (20, Urgency.NONE), (19, Urgency.WATCH), (10, Urgency.WATCH),
+    (9, Urgency.CRITICAL), (0, Urgency.CRITICAL),
+])
+@pytest.mark.parametrize("resource", list(Resource))
+def test_stock_threshold_boundaries(stock, expected, resource):
+    available = Bundle.single(resource, stock)
+    assert compute_urgency(available, Bundle(1, 1, 1), Bundle(3, 3, 3))[resource] is expected
+
+
+@pytest.mark.parametrize("available", range(1, 13))
+@pytest.mark.parametrize("urgency", list(Urgency))
+def test_scaled_trades_remain_affordable_and_within_price_cap(available, urgency):
+    give, receive = compute_terms(
+        Resource.FOOD, 4, Resource.WATER, Bundle(water=available), urgency
+    )
+    assert 0 < give.water <= available
+    assert 0 < receive.food <= 4
+    assert give.water / receive.food <= MAX_PREMIUM_RATIO
+
+
+@pytest.mark.parametrize("stock, ratio", [
+    (30, 1), (20, 1), (19, 1.2), (15, 1.2), (14, 1.5), (10, 1.5),
+    (9, 2), (8, 2.25), (7, 2.5), (6, 3.125), (5, 3.90625), (0, 8),
+])
+def test_stock_price_curve(stock, ratio):
+    assert premium_for(Urgency.NONE, stock) == ratio
+
+
+def test_desperation_grows_exponentially_below_seven_until_capped():
+    for stock in range(2, 7):
+        assert premium_for(Urgency.CRITICAL, stock) == pytest.approx(
+            premium_for(Urgency.CRITICAL, stock + 1) * 1.25)
+    prices = [premium_for(Urgency.NONE, stock) for stock in range(30, -1, -1)]
+    assert prices == sorted(prices)
+    assert max(prices) <= MAX_PREMIUM_RATIO

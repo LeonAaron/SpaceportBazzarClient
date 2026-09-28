@@ -23,15 +23,13 @@ MAX_SAFETY_TICKS = 10
 LOW_HEALTH_EXTRA_TICKS = 2
 PRODUCTION_VARIANCE_EXTRA_TICKS = 1
 
-# Resources we cannot produce arrive only when a trade settles, and partners can
-# go quiet at any time -- in run 2 most clients stopped trading around tick 45.
-# So we aim to hold enough of each import to last the rest of the run if trading
-# stopped now: at least IMPORT_TARGET_MIN_TICKS of upkeep, at most
-# IMPORT_TARGET_MAX_TICKS. The cap was chosen in the mixed-opponent simulation
-# (tests/survival/test_world_survival.py): higher caps hoarded supply other
-# planets needed and lowered how long the world as a whole survived.
-IMPORT_TARGET_MIN_TICKS = 20
-IMPORT_TARGET_MAX_TICKS = 60
+
+WATCH_STOCK = 20
+CRITICAL_STOCK = 10
+PRODUCTION_NORMAL_TICKS = 25
+PRODUCTION_STOP_TICKS = 10
+STORAGE_THRESHOLD = 32
+MAX_RESERVE_UNITS = 15
 
 
 class Urgency(enum.IntEnum):
@@ -60,52 +58,44 @@ def safety_ticks(
 
 
 def compute_reserve(
-    rules: Rules, station: StationObservation, memory: PolicyMemory
+    rules: Rules, station: StationObservation, memory: PolicyMemory,
+    available: Bundle | None = None,
 ) -> Bundle:
-    return Bundle(
-        *(
-            station.upkeep_per_tick.get(r) * safety_ticks(r, rules, station, memory)
-            for r in Resource
-        )
-    )
+    """Bank excess above 32, without counting already stored stock again.
+
+    Storage is local protection inside inventory, not a server-side transfer.
+    The upkeep buffer plus saved surplus cannot exceed 15 per resource.
+    """
+    available = station.inventory if available is None else available
+    reserves = []
+    stored = []
+    for resource in Resource:
+        base = min(MAX_RESERVE_UNITS, station.upkeep_per_tick.get(resource)
+                   * safety_ticks(resource, rules, station, memory))
+        have = available.get(resource)
+        saved = min(memory.stored_reserve.get(resource), have, MAX_RESERVE_UNITS - base)
+        excess = max(0, have - saved - STORAGE_THRESHOLD)
+        saved = min(MAX_RESERVE_UNITS - base, saved + excess)
+        stored.append(saved)
+        reserves.append(base + saved)
+    memory.stored_reserve = Bundle(*stored)
+    return Bundle(*reserves)
 
 
 def compute_urgency(
     available: Bundle, upkeep: Bundle, reserve: Bundle
 ) -> dict[Resource, Urgency]:
-    """CRITICAL means the next tick's upkeep is not covered by uncommitted stock."""
+    """Escalate below 20 and 10 uncommitted units, or sooner for high upkeep."""
     urgency: dict[Resource, Urgency] = {}
     for resource in Resource:
         have = available.get(resource)
-        if have < upkeep.get(resource):
+        if have < max(CRITICAL_STOCK, upkeep.get(resource)):
             urgency[resource] = Urgency.CRITICAL
-        elif have < reserve.get(resource):
+        elif have < max(WATCH_STOCK, reserve.get(resource)):
             urgency[resource] = Urgency.WATCH
         else:
             urgency[resource] = Urgency.NONE
     return urgency
-
-
-def import_target_ticks(ticks_remaining: int) -> int:
-    return max(IMPORT_TARGET_MIN_TICKS, min(IMPORT_TARGET_MAX_TICKS, ticks_remaining))
-
-
-def import_target(station: StationObservation, reserve: Bundle, ticks_remaining: int) -> Bundle:
-    """How much of each imported resource to hold; zero for our own specialty."""
-    ticks = import_target_ticks(ticks_remaining)
-    return Bundle(
-        *(
-            0
-            if r == station.specialty
-            else max(reserve.get(r), station.upkeep_per_tick.get(r) * ticks)
-            for r in Resource
-        )
-    )
-
-
-def specialty_spendable(available: Bundle, reserve: Bundle, specialty: Resource) -> int:
-    """Specialty stock we can promise away: everything above its reserve."""
-    return max(0, available.get(specialty) - reserve.get(specialty))
 
 
 def surplus_above_reserve(available: Bundle, reserve: Bundle) -> Bundle:
@@ -114,3 +104,19 @@ def surplus_above_reserve(available: Bundle, reserve: Bundle) -> Bundle:
 
 def deficit_below_reserve(available: Bundle, reserve: Bundle) -> Bundle:
     return reserve.saturating_sub(available)
+
+
+def production_payment_limit(available: Bundle, station: StationObservation) -> float | None:
+    """Cap payments by uncommitted ticks of our produced resource's upkeep."""
+    upkeep = station.upkeep_per_tick.get(station.specialty)
+    stock = available.get(station.specialty)
+    if stock < PRODUCTION_STOP_TICKS * upkeep:
+        return 0.0
+    if stock < PRODUCTION_NORMAL_TICKS * upkeep:
+        return 0.5
+    return None
+
+
+def comfortably_supplied(available: Bundle) -> bool:
+    """All resources must be strictly above 30 uncommitted units."""
+    return all(available.get(resource) > 30 for resource in Resource)

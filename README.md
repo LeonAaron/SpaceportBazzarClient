@@ -64,33 +64,6 @@ The token is wrapped so it cannot be printed by accident, and a logging filter
 scrubs it from every record as a second line of defence. Credentials and reports
 are gitignored.
 
-`make` is not installed on Windows by default. Every Makefile target is a thin
-wrapper, so run the command behind it directly, for example
-`docker compose exec -T bazaar python -m bazaar_client.cli --mode trade ...`.
-
-### Before a class run
-
-Deploy from a clean, committed checkout. The client logs its branch and commit
-at startup (`client build main@65468f7bc8a9`), so a run log always says which
-code played. In run 2 the offers on record were ones our committed code cannot
-make, which means an older or modified build was deployed.
-
-Pass `--evidence-file` so the run can be explained afterwards. Alongside one
-record per command, the trading loop writes a `decision` record each tick: health,
-inventory, import targets, spare specialty, open offers, and every action with
-its reason.
-
-### Analysing a Directorate run log
-
-```sh
-python scripts/analyze_run.py run-2-log.json --station P01
-```
-
-This prints every planet's outcome, how the galaxy's resources were used, and for
-one station its offer terms against their outcomes plus a health and stock
-timeline. It needs only the Python standard library, so other teams can run it
-too.
-
 ## Tests
 
 ```sh
@@ -99,7 +72,7 @@ make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
-491 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
+420 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`.
 
@@ -108,11 +81,7 @@ format, handshake and command set exactly, and it cannot exercise the trading
 policy — any unscripted command ends the exercise as `scenario mismatch`, by
 design. The policy is covered by unit tests and simulated multi-tick
 economies, including nine planets with variable production, delayed acceptance,
-temporary outages, a replay of the Directorate's run 2, and full runs against
-stand-ins for the clients seen in that run, measuring how long the world and our
-planet survive (`tests/survival/test_world_survival.py`). The trading rules
-(one-for-one, paid only in our specialty) are checked on every action across a
-grid of situations. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
+and temporary outages. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
 
 ## Layout
 
@@ -126,10 +95,6 @@ bazaar_client/
   execution/   actions, sending, evidence log
   autonomous.py         the trading loop
   scripted_walkthrough.py  the practice exercise replay
-  version.py            which build is running
-scripts/
-  gen_proto.sh          protobuf codegen
-  analyze_run.py        summarise a Directorate run log
 ```
 
 After dependency or Dockerfile changes, rebuild the running service with
@@ -140,3 +105,40 @@ fresh container without restarting an existing practice exercise:
 docker compose build
 docker compose run --rm --no-deps bazaar sh -c 'scripts/gen_proto.sh && pytest --cov=bazaar_client --cov-branch'
 ```
+
+Trading continuously offers surplus production for the two imported resources,
+even while stocks are healthy. Import prices use uncommitted stock:
+
+| Import stock | Offered payment per unit received |
+| --- | --- |
+| 20+ | 1 |
+| 15–19 | 1.2 |
+| 10–14 | 1.5 |
+| 9 / 8 / 7 | 2 / 2.25 / 2.5 |
+| Below 7 | 2.5 × 1.25^(7 − stock), capped at 8 |
+
+Trades normally request four units; the 1.2 tier requests five so six units of
+payment express the price exactly. Other prices round to whole units. Incoming
+production-for-import offers use the same curve and are evaluated before
+advertising. Advertisements continuously list production for sale and imports
+as wanted, renewing before expiry.
+
+Production protection uses the balance **after payment is reserved**, including
+all standing offers. Normal offers retain 25 ticks of specialty upkeep; trades
+at 0.5:1 or better retain 10 ticks. Below 10 ticks no paid trades are permitted.
+New offers and acceptances cannot invalidate standing normal offers by dropping
+the balance below 25 ticks. Outgoing gifts also retain 25 ticks; free incoming
+gifts remain welcome. These buffers allow normal trades from the 30-unit start.
+
+When **every** resource is above 30 uncommitted units, stop advertising and
+withdraw any active advertisement. Continue seeking trades, but accept only
+offers with a strict net gain in total units and no received units of our own
+produced resource (including mixed bundles). At 30 or below in any resource,
+normal advertising and acceptance resume.
+
+Excess above 32 uncommitted units of any resource builds a protected storage
+balance within inventory. The upkeep reserve plus this stored balance is capped
+at 15 units per resource. Already stored units are excluded when calculating
+new excess, so repeated snapshots do not count the same stock twice. Storage
+persists when inventory falls and can be consumed by upkeep, but not trades.
+There is no separate server-side storage or deposit command.

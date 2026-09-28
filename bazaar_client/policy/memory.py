@@ -10,7 +10,7 @@ import statistics
 from collections import deque
 from dataclasses import dataclass, field
 
-from bazaar_client.domain.types import Resource, Snapshot
+from bazaar_client.domain.types import Bundle, Resource, Snapshot
 from bazaar_client.world.counterparties import CounterpartyModel
 
 ROUND_TRIP_SAMPLES = 8
@@ -27,6 +27,7 @@ class PolicyMemory:
     productions: deque[int] = field(default_factory=lambda: deque(maxlen=PRODUCTION_SAMPLES))
     blocked_until_tick: int = 0
     altruism_log: dict[tuple[str, Resource], int] = field(default_factory=dict)
+    stored_reserve: Bundle = field(default_factory=Bundle.zero)
 
     _measured_transactions: set[str] = field(default_factory=set)
     _last_tick_seen: int = -1
