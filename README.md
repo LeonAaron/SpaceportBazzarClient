@@ -142,3 +142,77 @@ at 15 units per resource. Already stored units are excluded when calculating
 new excess, so repeated snapshots do not count the same stock twice. Storage
 persists when inventory falls and can be consumed by upkeep, but not trades.
 There is no separate server-side storage or deposit command.
+
+## Hivemind mode
+
+The [upstream Hivemind README](spaceport_hivemind/README.md) describes a central
+coordinator: bridges forward Bazaar state and execute its explicit commands.
+This checkout pins that repository as a Git submodule. Initialize it on a fresh
+checkout, then install its optional package into the same environment as this
+client:
+
+```sh
+git submodule update --init --recursive
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt -e ./spaceport_hivemind
+```
+
+In separate terminals, start the demo game and coordinator:
+
+```sh
+.venv/bin/hivemind-demo-server --credential-file /tmp/hive-demo-credentials.json \
+  --stations P01,P02,P03 --duration-ticks 30 --tick-duration-ms 1000
+
+.venv/bin/hivemind-server --host 127.0.0.1 --port 8765 \
+  --shared-key local-hive-key --station-count 3
+```
+
+Start one assignment client for each station, changing `P01` to `P02` and `P03`:
+
+```sh
+BAZAAR_HIVEMIND_KEY=local-hive-key .venv/bin/python -m bazaar_client.cli \
+  --mode hivemind --station-id P01 \
+  --credentials-file /tmp/hive-demo-credentials.json \
+  --ws-url ws://127.0.0.1:3001/ws \
+  --hivemind-endpoint ws://127.0.0.1:8765
+```
+
+`--hivemind-endpoint` also accepts `BAZAAR_HIVEMIND_ENDPOINT`;
+`--hivemind-key` overrides `BAZAAR_HIVEMIND_KEY`. Existing game-token flags,
+environment variables, and credentials files work in this mode. The game token
+stays at the bridge; the coordinator receives its separate shared key. Both
+secrets are redacted by this client's logging setup.
+
+Hivemind mode delegates to upstream `HivemindClient`, using its binary Bazaar
+connection and JSON coordinator protocol. The local trading policy, autonomous
+reconnect supervisor, evidence log, and `--max-decisions` do not run in this
+mode. A connection failure exits through the CLI error handler. The default
+`--mode trade` still runs the assignment policy. Run only one client per station.
+For Docker, install the optional package inside the running container with
+`docker compose exec bazaar pip install -e /workspace/spaceport_hivemind` and use
+endpoints reachable from that container.
+
+All configured bridges must connect before the demo game starts. The assignment
+practice server accepts only P01 and follows a fixed script, so use the hivemind
+demo server for coordinated trading. Verify this client's adapter with:
+
+```sh
+.venv/bin/python -m pytest tests/unit/test_hivemind.py tests/integration/test_hivemind_demo.py -q
+```
+
+### Rebase validation
+
+The assignment policy was preserved when rebasing onto the incoming optimization
+branch. Incoming decision logging, build identification, run analysis, and
+counterparty observations remain; decision logs now report the assignment's
+reserve and surplus. The grid tests enforce the assignment price cap instead
+of the replaced strategy's fixed 1:1 pricing.
+
+The suite is not fully green: seven five-unit-start simulation failures also
+reproduce on the original assignment commit (`26b9909`), whose production guards
+prevent recovery in those scenarios. Five incoming world-simulation assertions
+also fail with the preserved policy: four expect stronger survival against
+quitting suppliers and one requires every trade to be 1:1. These assertions remain
+visible. The earlier coverage and test-count figures above are historical, not
+validation of this combined version. The original commit is saved locally as
+`backup/assignment-before-hivemind`.

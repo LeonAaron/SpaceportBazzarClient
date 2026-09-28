@@ -11,11 +11,14 @@ import asyncio
 import logging
 import sys
 
-from bazaar_client.app import BazaarSession, CommandOutcome
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bazaar_client.app import CommandOutcome
 from bazaar_client.config import ClientConfig, MissingTokenError, config_from_args
-from bazaar_client.domain import mappers
 from bazaar_client.domain.types import Phase, Resource, Snapshot
 from bazaar_client.logging_setup import configure_logging
+from bazaar_client.hivemind import run_hivemind_mode
 
 logger = logging.getLogger("bazaar_client.cli")
 
@@ -92,6 +95,9 @@ def describe_outcome(outcome: CommandOutcome) -> None:
 
 
 async def run(config: ClientConfig) -> int:
+    from bazaar_client.app import BazaarSession
+    from bazaar_client.domain import mappers
+
     async with BazaarSession(config) as session:
         snapshot, ack = await session.handshake()
 
@@ -190,11 +196,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
 
-    configure_logging(config.log_level, secrets=[config.token.reveal()])
+    secrets = [config.token.reveal()]
+    if config.hivemind_key:
+        secrets.append(config.hivemind_key.reveal())
+    configure_logging(config.log_level, secrets=secrets)
     modes = {
         "handshake": run,
         "trade": run_trade_mode,
         "walkthrough": run_walkthrough_mode,
+        "hivemind": run_hivemind_mode,
     }
     try:
         return asyncio.run(modes[config.mode](config))

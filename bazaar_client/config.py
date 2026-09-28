@@ -65,6 +65,8 @@ class ClientConfig:
     mode: str = "trade"
     evidence_file: Path | None = None
     max_decisions: int | None = None
+    hivemind_endpoint: str = "ws://127.0.0.1:8765"
+    hivemind_key: Secret | None = None
 
 
 def read_token_from_credentials(path: Path, station_id: str) -> str:
@@ -146,11 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("trade", "handshake", "walkthrough"),
+        choices=("trade", "handshake", "walkthrough", "hivemind"),
         default=os.environ.get("BAZAAR_MODE", "trade"),
         help=(
             "trade: run the trading policy; handshake: connect and advertise once; "
-            "walkthrough: replay the practice server's scripted exercise"
+            "walkthrough: replay the practice server's scripted exercise; "
+            "hivemind: forward state and execute coordinator commands"
         ),
     )
     parser.add_argument(
@@ -169,6 +172,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="stop after this many decisions (useful for a bounded demo run)",
     )
+    parser.add_argument(
+        "--hivemind-endpoint",
+        default=os.environ.get("BAZAAR_HIVEMIND_ENDPOINT", "ws://127.0.0.1:8765"),
+        help="Hivemind WebSocket endpoint (env: BAZAAR_HIVEMIND_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--hivemind-key",
+        default=os.environ.get("BAZAAR_HIVEMIND_KEY"),
+        help="Hivemind shared key (env: BAZAAR_HIVEMIND_KEY)",
+    )
     return parser
 
 
@@ -183,4 +196,6 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         mode=args.mode,
         evidence_file=args.evidence_file,
         max_decisions=args.max_decisions,
+        hivemind_endpoint=args.hivemind_endpoint,
+        hivemind_key=Secret(args.hivemind_key) if args.hivemind_key else None,
     )

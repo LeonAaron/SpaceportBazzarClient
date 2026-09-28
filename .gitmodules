@@ -1,0 +1,3 @@
+[submodule "spaceport_hivemind"]
+	path = spaceport_hivemind
+	url = https://github.com/ldmoore/spaceport_hivemind.git
