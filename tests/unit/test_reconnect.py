@@ -213,3 +213,81 @@ async def test_reconnect_attempts_are_bounded(monkeypatch):
     await run_trading(make_config(), max_attempts=3, sleep=lambda d: _record([], d))
 
     assert len(ScriptedSession.attempts) == 3
+
+
+# --- joining a run that has not started yet ----------------------------------
+
+
+async def test_a_quiet_server_does_not_end_the_session(monkeypatch):
+    """Before a run starts the server can go quiet for minutes. Run 2's P01
+    dropped and reconnected ten times at tick 0 because silence was treated as
+    a dead connection."""
+    from bazaar_client.autonomous import TradingLoop
+
+    connection = FakeConnection()
+    session = BazaarSession(make_config(), connection=connection)
+    await session.start()
+    real_wait = session.wait_for_snapshot
+    monkeypatch.setattr(
+        session, "wait_for_snapshot",
+        lambda min_sequence=1, timeout=15.0: real_wait(min_sequence, timeout=0.02),
+    )
+    task = None
+    try:
+        lobby = factories.make_snapshot(phase=Phase.READY)
+        await push(connection, lobby, session)
+        await push(connection, factories.make_readiness(run_id=lobby.run_id, snapshot_sequence=1), session)
+        task = asyncio.create_task(TradingLoop(session).run())
+
+        await asyncio.sleep(0.2)  # ten times the wait timeout, with no new state
+        assert not task.done()
+        assert not connection.closed
+
+        finished = factories.make_snapshot(snapshot_sequence=2, phase=Phase.FINISHED)
+        await push(connection, finished, session)
+        stats = await asyncio.wait_for(task, 1)
+        assert stats.final_snapshot.phase is Phase.FINISHED
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+        await session.stop()
+
+
+async def test_a_connection_that_really_closes_still_ends_the_session():
+    from bazaar_client.autonomous import TradingLoop
+
+    connection = FakeConnection()
+    session = BazaarSession(make_config(), connection=connection)
+    await session.start()
+    try:
+        snapshot = factories.make_snapshot(phase=Phase.READY)
+        await push(connection, snapshot, session)
+        await push(connection, factories.make_readiness(run_id=snapshot.run_id, snapshot_sequence=1), session)
+        task = asyncio.create_task(TradingLoop(session).run())
+        await asyncio.sleep(0)
+
+        await push(connection, ConnectionClosedSentinel(), session)
+
+        await asyncio.wait_for(task, 1)
+    finally:
+        await session.stop()
+
+
+async def test_after_a_working_session_a_drop_is_retried_quickly(monkeypatch):
+    """Backoff is for a server that keeps refusing us, not for one good session
+    after another; otherwise a mid-run drop could cost us 30 seconds of ticks."""
+    slept = []
+
+    def behaviour(loop):
+        loop.stats.decisions += 1
+        loop.stats.final_snapshot = factories.make_snapshot(phase=Phase.RUNNING)
+
+    install(monkeypatch, ["ok"] * 6, behaviour)
+
+    await run_trading(
+        make_config(reconnect_max_backoff_s=30.0), max_decisions=5,
+        sleep=lambda d: _record(slept, d),
+    )
+
+    assert len(slept) == 4
+    assert max(slept) <= 1.2  # first-attempt delay every time, never growing

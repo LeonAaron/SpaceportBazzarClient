@@ -183,3 +183,14 @@ async def test_a_second_connection_repeats_the_readiness_exchange(practice_serve
         assert snapshot.snapshot_sequence == 1
         assert ack.ready
         assert snapshot.run_id == ack.run_id
+
+
+async def test_check_mode_joins_and_sends_nothing_but_readiness(practice_server, tmp_path):
+    """The pre-flight for a live server: prove the key and endpoint work without
+    touching the market. The practice server records every message we send."""
+    from bazaar_client.cli import run_check_mode
+
+    assert await run_check_mode(config_for(practice_server, tmp_path)) == 0
+
+    inbound = practice_server.read_report()["inbound"]
+    assert [m["message_type"] for m in inbound] == ["ready"]

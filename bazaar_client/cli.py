@@ -16,6 +16,7 @@ from bazaar_client.config import ClientConfig, MissingTokenError, config_from_ar
 from bazaar_client.domain import mappers
 from bazaar_client.domain.types import Phase, Resource, Snapshot
 from bazaar_client.logging_setup import configure_logging
+from bazaar_client.version import build_id
 
 logger = logging.getLogger("bazaar_client.cli")
 
@@ -160,6 +161,31 @@ async def run(config: ClientConfig) -> int:
         return 0
 
 
+async def run_check_mode(config: ClientConfig) -> int:
+    """Join, confirm readiness, report our planet, and leave without trading.
+
+    Safe against a live server: no advertisement, offer or accept is sent.
+    """
+    async with BazaarSession(config) as session:
+        snapshot, ack = await session.handshake()
+        me = snapshot.me
+        logger.info(
+            "joined run %s as %s (client build %s): phase %s, tick %d of %d",
+            snapshot.run_id, snapshot.self_station_id, build_id(),
+            snapshot.phase.name, snapshot.tick, snapshot.rules.duration_ticks,
+        )
+        logger.info(
+            "specialty %s | health %d | inventory %s | upkeep %s | %d planets",
+            me.specialty.name, me.health, me.inventory.as_dict(),
+            me.upkeep_per_tick.as_dict(), len(snapshot.directory),
+        )
+        if not (ack.ready and ack.snapshot_sequence == snapshot.snapshot_sequence):
+            logger.error("readiness was not confirmed for the snapshot we declared")
+            return 1
+        logger.info("readiness confirmed: this key and endpoint are ready to trade")
+        return 0
+
+
 async def run_trade_mode(config: ClientConfig) -> int:
     from bazaar_client.autonomous import run_trading
 
@@ -192,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(config.log_level, secrets=[config.token.reveal()])
     modes = {
+        "check": run_check_mode,
         "handshake": run,
         "trade": run_trade_mode,
         "walkthrough": run_walkthrough_mode,

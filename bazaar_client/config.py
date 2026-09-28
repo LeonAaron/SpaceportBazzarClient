@@ -146,11 +146,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("trade", "handshake", "walkthrough"),
+        choices=("trade", "check", "handshake", "walkthrough"),
         default=os.environ.get("BAZAAR_MODE", "trade"),
         help=(
-            "trade: run the trading policy; handshake: connect and advertise once; "
-            "walkthrough: replay the practice server's scripted exercise"
+            "trade: run the trading policy; check: join, confirm readiness and leave "
+            "without trading (safe on a live server); handshake: connect and "
+            "advertise once (practice server); walkthrough: replay the practice "
+            "server's scripted exercise"
         ),
     )
     parser.add_argument(

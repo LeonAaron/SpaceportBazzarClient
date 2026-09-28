@@ -102,7 +102,14 @@ class TradingLoop:
         while max_decisions is None or self.stats.decisions < max_decisions:
             try:
                 snapshot = await self._session.wait_for_snapshot(min_sequence=sequence)
-            except (SessionClosedError, asyncio.TimeoutError) as exc:
+            except asyncio.TimeoutError:
+                # A quiet server is not a dead connection: before a run starts
+                # nothing may change for minutes. Dropping and reconnecting here
+                # is what made run 2's P01 connect ten times at tick 0. A socket
+                # that really dies ends the wait with SessionClosedError instead.
+                logger.info("no new state yet; staying connected and waiting")
+                continue
+            except SessionClosedError as exc:
                 logger.info("stopping: %s", exc)
                 break
 
@@ -240,12 +247,18 @@ async def run_trading(
 
     while max_attempts is None or attempt < max_attempts:
         attempt += 1
+        decisions_before = stats.decisions
         try:
             async with BazaarSession(config, throttle=throttle) as session:
                 loop = TradingLoop(
                     session, memory=memory, stats=stats, evidence=evidence
                 )
                 await loop.run(max_decisions)
+
+                if stats.decisions > decisions_before:
+                    # That connection worked; a later drop should retry quickly,
+                    # not inherit the long delays of a string of failures.
+                    attempt = 0
 
                 if session.abort_reason is not None:
                     logger.error("not reconnecting: %s", session.abort_reason)

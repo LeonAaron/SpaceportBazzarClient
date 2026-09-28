@@ -243,7 +243,7 @@ policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
 **Coverage** is 94% combined statement/branch coverage over handwritten code
-from all 491 tests, including the practice-server integration tests (`make cov`).
+from all 495 tests, including the practice-server integration tests (`make cov`).
 The generated `bazaar_pb2.py` is excluded (its correctness is covered by the round-trip tests instead), and
 remaining gaps include transport failure paths and supervisor/CLI branches.
 The live integration tests exercise the real socket and scripted exchange, but

@@ -51,7 +51,7 @@ environment variable, flag winning:
 | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
 | `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | none |
 | `--log-level` | `BAZAAR_LOG_LEVEL` | `INFO` |
-| `--mode` | `BAZAAR_MODE` | `trade` |
+| `--mode` | `BAZAAR_MODE` | `trade` (also `check`, `handshake`, `walkthrough`) |
 
 Changing server or port needs no code change:
 
@@ -67,6 +67,31 @@ are gitignored.
 `make` is not installed on Windows by default. Every Makefile target is a thin
 wrapper, so run the command behind it directly, for example
 `docker compose exec -T bazaar python -m bazaar_client.cli --mode trade ...`.
+
+### Joining a live run
+
+From PowerShell in the repo root. The key goes in an environment variable for
+this terminal only, so it never lands in a file, the repo, or the command line
+the container sees:
+
+```powershell
+docker compose up -d --build
+docker compose exec -T bazaar scripts/gen_proto.sh
+$env:BAZAAR_WS_URL = "wss://spaceport.edneo.com/ws"
+$env:BAZAAR_TOKEN  = "<your key>"
+
+# 1. Pre-flight: join, confirm readiness, report our planet, leave. Sends no trades.
+docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode check
+
+# 2. Play: leave this running for the whole run.
+docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode trade --evidence-file logs/live-evidence.jsonl
+```
+
+`-e NAME` without a value forwards that variable from the terminal into the
+container. The server works out which planet we are from the key, so no station
+ID is needed. Start the client before the run begins: it waits on a quiet
+connection instead of reconnecting, and reconnects by itself if the connection
+really drops. `logs/` is gitignored.
 
 ### Before a class run
 
@@ -99,7 +124,7 @@ make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
-491 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
+495 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`.
 
