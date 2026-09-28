@@ -213,3 +213,122 @@ async def test_reconnect_attempts_are_bounded(monkeypatch):
     await run_trading(make_config(), max_attempts=3, sleep=lambda d: _record([], d))
 
     assert len(ScriptedSession.attempts) == 3
+
+
+async def test_connection_changes_are_recorded_in_the_evidence_log(monkeypatch, tmp_path):
+    """Disconnected periods must be recoverable from the structured log alone."""
+    import json
+
+    def behaviour(loop):
+        loop.stats.decisions += 1
+        loop.stats.final_snapshot = factories.make_snapshot(phase=Phase.FINISHED)
+
+    install(monkeypatch, ["refuse", "ok"], behaviour)
+    path = tmp_path / "evidence.jsonl"
+
+    await run_trading(make_config(), path, max_attempts=3, sleep=lambda d: _record([], d))
+
+    events = [
+        json.loads(line)["event"]
+        for line in path.read_text().splitlines()
+        if '"connection"' in line
+    ]
+    assert events == [
+        "connecting", "disconnected", "reconnecting", "connecting", "connected", "closed",
+    ]
+
+
+def test_an_idle_tick_is_logged_once_even_across_a_reconnect():
+    """Run 2's log repeated tick 0 once per reconnect: each new loop forgot it."""
+    from bazaar_client.autonomous import TradingLoop, TradingStats
+    from bazaar_client.execution.evidence import EvidenceLog
+    from bazaar_client.policy.decide import decide
+    from bazaar_client.policy.memory import PolicyMemory
+
+    stats, evidence = TradingStats(), EvidenceLog()
+    snapshot = factories.make_snapshot(phase=Phase.READY)
+    decision, _ = decide(snapshot, PolicyMemory())
+    assert not decision.actions
+
+    for _ in range(3):  # one loop per connection, as run_trading builds them
+        TradingLoop(object(), stats=stats, evidence=evidence)._log_decision(snapshot, decision)
+
+    assert len(evidence.decisions) == 1
+
+
+# --- joining a run that has not started yet ----------------------------------
+
+
+async def test_a_quiet_server_does_not_end_the_session(monkeypatch):
+    """Before a run starts the server can go quiet for minutes. Run 2's P01
+    dropped and reconnected ten times at tick 0 because silence was treated as
+    a dead connection."""
+    from bazaar_client.autonomous import TradingLoop
+
+    connection = FakeConnection()
+    session = BazaarSession(make_config(), connection=connection)
+    await session.start()
+    real_wait = session.wait_for_snapshot
+    monkeypatch.setattr(
+        session, "wait_for_snapshot",
+        lambda min_sequence=1, timeout=15.0: real_wait(min_sequence, timeout=0.02),
+    )
+    task = None
+    try:
+        lobby = factories.make_snapshot(phase=Phase.READY)
+        await push(connection, lobby, session)
+        await push(connection, factories.make_readiness(run_id=lobby.run_id, snapshot_sequence=1), session)
+        task = asyncio.create_task(TradingLoop(session).run())
+
+        await asyncio.sleep(0.2)  # ten times the wait timeout, with no new state
+        assert not task.done()
+        assert not connection.closed
+
+        finished = factories.make_snapshot(snapshot_sequence=2, phase=Phase.FINISHED)
+        await push(connection, finished, session)
+        stats = await asyncio.wait_for(task, 1)
+        assert stats.final_snapshot.phase is Phase.FINISHED
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+        await session.stop()
+
+
+async def test_a_connection_that_really_closes_still_ends_the_session():
+    from bazaar_client.autonomous import TradingLoop
+
+    connection = FakeConnection()
+    session = BazaarSession(make_config(), connection=connection)
+    await session.start()
+    try:
+        snapshot = factories.make_snapshot(phase=Phase.READY)
+        await push(connection, snapshot, session)
+        await push(connection, factories.make_readiness(run_id=snapshot.run_id, snapshot_sequence=1), session)
+        task = asyncio.create_task(TradingLoop(session).run())
+        await asyncio.sleep(0)
+
+        await push(connection, ConnectionClosedSentinel(), session)
+
+        await asyncio.wait_for(task, 1)
+    finally:
+        await session.stop()
+
+
+async def test_after_a_working_session_a_drop_is_retried_quickly(monkeypatch):
+    """Backoff is for a server that keeps refusing us, not for one good session
+    after another; otherwise a mid-run drop could cost us 30 seconds of ticks."""
+    slept = []
+
+    def behaviour(loop):
+        loop.stats.decisions += 1
+        loop.stats.final_snapshot = factories.make_snapshot(phase=Phase.RUNNING)
+
+    install(monkeypatch, ["ok"] * 6, behaviour)
+
+    await run_trading(
+        make_config(reconnect_max_backoff_s=30.0), max_decisions=5,
+        sleep=lambda d: _record(slept, d),
+    )
+
+    assert len(slept) == 4
+    assert max(slept) <= 1.2  # first-attempt delay every time, never growing

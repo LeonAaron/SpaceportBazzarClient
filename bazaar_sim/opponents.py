@@ -1,8 +1,8 @@
-"""Stand-in clients for the other planets, and a harness that pits them against ours.
+"""Stand-in clients for the other planets, modelled on the Directorate's run 2.
 
-Each stand-in reproduces a behaviour seen in the Directorate's run 2 log (see
+Each stand-in reproduces a behaviour seen in that run's log (see
 `scripts/analyze_run.py`), so "does our policy do better?" is asked against the
-opponents we actually met rather than against copies of ourselves:
+opponents we actually met rather than only against copies of ourselves:
 
   Passive    never trades                                      (run 2: P02 Pelagos)
   Greedy     asks twice what it gives, pays with anything      (run 2: the P01 build)
@@ -10,8 +10,9 @@ opponents we actually met rather than against copies of ourselves:
   Quitter    a SmallFair client that goes quiet at tick 45     (run 2: P05 Vega)
   Gifter     gives its specialty away every tick               (run 2: P04 Altair)
 
-The harness records the tick each planet first fails, so tests can compare how
-long each planet -- and the world as a whole -- stays alive.
+A player is anything with a `name` and `act(snapshot) -> actions`. Our client's
+strategies join through `StrategyPlayer`, which runs the same `Strategy` object
+the live trading loop runs.
 """
 
 from __future__ import annotations
@@ -20,14 +21,9 @@ from dataclasses import dataclass, field
 
 from bazaar_client.domain.types import Bundle, Resource, Snapshot
 from bazaar_client.execution.actions import AcceptAction, AdvertiseAction, OfferAction
-from bazaar_client.policy.decide import decide
 from bazaar_client.policy.memory import PolicyMemory
+from bazaar_client.strategy import DEFAULT_STRATEGY, Strategy, get_strategy
 from bazaar_client.world.commitments import CommitmentTracker
-from tests.survival.test_simulated_run import RULES, SimStation, SimulatedEconomy
-
-RUN_TICKS = 120
-PHASES = (2, 5, 6)
-PHASE_TICKS = 12
 
 
 def imports_of(obs: Snapshot) -> list[Resource]:
@@ -39,7 +35,7 @@ def others_of(obs: Snapshot) -> list[str]:
 
 
 def expiry(obs: Snapshot, ttl: int) -> int:
-    return min(obs.tick + ttl, RULES.duration_ticks)
+    return min(obs.tick + ttl, obs.rules.duration_ticks)
 
 
 def accept_if_not_worse(obs: Snapshot, only_specialty: bool, limit: int = 2) -> list[AcceptAction]:
@@ -58,16 +54,22 @@ def accept_if_not_worse(obs: Snapshot, only_specialty: bool, limit: int = 2) -> 
     return accepts
 
 
-class OurPolicy:
-    name = "ours"
+class StrategyPlayer:
+    """One of our client's strategies, with the memory it would carry between ticks."""
 
-    def __init__(self) -> None:
+    def __init__(self, strategy: Strategy | None = None, name: str | None = None) -> None:
+        self.strategy = strategy or get_strategy(DEFAULT_STRATEGY)
+        self.name = name or self.strategy.name
         self.memory = PolicyMemory()
         self.commitments = CommitmentTracker()
 
     def act(self, obs: Snapshot) -> list:
-        decision, self.memory = decide(obs, self.memory, self.commitments)
+        decision, self.memory = self.strategy.decide(obs, self.memory, self.commitments)
         return decision.actions
+
+
+def OurPolicy() -> StrategyPlayer:
+    return StrategyPlayer(get_strategy(DEFAULT_STRATEGY), name="ours")
 
 
 class Passive:
@@ -101,7 +103,7 @@ class Greedy:
             if obs.me.inventory.get(want) >= 25 or spare < 2:
                 continue
             for _ in range(2):
-                if len(actions) >= RULES.new_commands_per_station_per_tick or spare < 2:
+                if len(actions) >= obs.rules.new_commands_per_station_per_tick or spare < 2:
                     break
                 actions.append(OfferAction(
                     self.rotation.next(others_of(obs)),
@@ -136,7 +138,7 @@ class SmallFair:
         for want in imports_of(obs):
             if obs.me.inventory.get(want) >= self.target or spare < self.size:
                 continue
-            if len(actions) >= RULES.new_commands_per_station_per_tick:
+            if len(actions) >= obs.rules.new_commands_per_station_per_tick:
                 break
             actions.append(OfferAction(
                 self.rotation.next(others_of(obs)),
@@ -183,56 +185,3 @@ def lineup(subject, opponents: list, slot: int = 0) -> list:
     roster = list(opponents)
     roster.insert(slot, subject)
     return roster
-
-
-@dataclass
-class WorldOutcome:
-    economy: SimulatedEconomy
-    roster: dict[str, object]
-    failed_at: dict[str, int]
-    ticks: int
-
-    def alive_ticks(self, station_id: str) -> int:
-        return self.failed_at.get(station_id, self.ticks)
-
-    @property
-    def world_alive_ticks(self) -> int:
-        """Planet-ticks lived across the whole world: the collective score."""
-        return sum(self.alive_ticks(sid) for sid in self.roster)
-
-    @property
-    def survivors(self) -> set[str]:
-        return set(self.roster) - set(self.failed_at)
-
-    def station_of(self, strategy) -> str:
-        return next(sid for sid, s in self.roster.items() if s is strategy)
-
-    def summary(self) -> str:
-        return ", ".join(
-            f"{sid}:{self.roster[sid].name}="
-            f"{'alive' if sid not in self.failed_at else 't' + str(self.failed_at[sid])}"
-            f"/hp{self.economy.stations[sid].health}"
-            for sid in self.roster
-        )
-
-
-def run_world(strategies: list, ticks: int = RUN_TICKS, phase_offset: int = 0) -> WorldOutcome:
-    """Nine planets, 30 of everything, production cycling 2/5/6 in 12-tick phases."""
-    roster = {f"P{i + 1:02}": s for i, s in enumerate(strategies)}
-    economy = SimulatedEconomy(*(
-        SimStation(sid, list(Resource)[i % 3], Bundle(30, 30, 30))
-        for i, sid in enumerate(roster)
-    ))
-    failed_at: dict[str, int] = {}
-    for tick in range(ticks):
-        for i, station in enumerate(economy.stations.values()):
-            station.production = PHASES[(tick // PHASE_TICKS + i + phase_offset) % len(PHASES)]
-        for sid, strategy in roster.items():
-            if economy.stations[sid].failed_once:
-                continue
-            economy.apply(sid, strategy.act(economy.observation_for(sid)))
-        economy.advance_tick()
-        for sid, station in economy.stations.items():
-            if station.failed_once and sid not in failed_at:
-                failed_at[sid] = economy.tick
-    return WorldOutcome(economy, roster, failed_at, ticks)

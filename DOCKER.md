@@ -42,8 +42,9 @@ python -c 'import json; print(next(p["token"] for p in json.load(open("validatio
 ```
 
 Follow the [exercise guide](bazaar-protobuf-starter-linux/README.md) for the
-authentication headers, subprotocol, and message sequence. A trading client is
-not yet implemented.
+authentication headers, subprotocol, and message sequence. The client itself is
+run with `python -m bazaar_client.cli` (see [README.md](README.md)); our own
+multi-planet server with `python -m bazaar_sim.server` (see [SIMULATOR.md](SIMULATOR.md)).
 
 ## Stop and reset
 

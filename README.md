@@ -4,10 +4,23 @@ A Python client for the Spaceport Bazaar trading simulation. It connects over
 WebSocket, speaks binary Protobuf, keeps its planet supplied, and trades with
 the other planets.
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — design, the trading policy, and what the
-  tests do and do not prove
+- [ARCHITECTURE.md](ARCHITECTURE.md) — design, the trading policy, how an offer
+  moves through the code, and what the tests do and do not prove
+- [LOG_FORMAT.md](LOG_FORMAT.md) — the structured log format we propose (Task 7), with examples
+- [SIMULATOR.md](SIMULATOR.md) — our own test server and local simulations:
+  which rules they implement, and what they leave out
+- [BENCHMARKS.md](BENCHMARKS.md) — how strategies are compared, and how a result is reproduced
 - [DOCKER.md](DOCKER.md) — the container workflow
 - [SPECIFICATIONS.md](SPECIFICATIONS.md) — the assignment
+- [SweSpec.md](SweSpec.md) — our engineering self-assessment, with the evidence for each rating
+
+**One command checks everything** (tests, coverage, practice server, a live
+simulation, benchmark reproducibility) and records exactly which revision passed:
+
+```sh
+make check                         # in the container; CI runs the same on every push
+python scripts/check.py --quick    # tests only, anywhere Python and the requirements are installed
+```
 
 ## Setup
 
@@ -49,9 +62,15 @@ environment variable, flag winning:
 | `--token` | `BAZAAR_TOKEN` | read from the credentials file |
 | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
 | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
-| `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | none |
+| `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | auto: `logs/live/<UTC timestamp>/<mode>-<station>-evidence.jsonl` for `trade`/`walkthrough`; none for `check`/`handshake` |
+| `--no-evidence` | | off: disables the automatic evidence log for `trade`/`walkthrough` |
 | `--log-level` | `BAZAAR_LOG_LEVEL` | `INFO` |
-| `--mode` | `BAZAAR_MODE` | `trade` |
+| `--mode` | `BAZAAR_MODE` | `trade` (also `check`, `handshake`, `walkthrough`) |
+| `--strategy` | `BAZAAR_STRATEGY` | `reserve-trader` (also `passive`, a never-trading baseline) |
+| `--status-every` | `BAZAAR_STATUS_EVERY` | `10`: log a status panel every N ticks, `0` off |
+| `--status-file` | `BAZAAR_STATUS_FILE` | none: rewrite this file with the live panel (`.html` auto-refreshes) |
+| `--max-decisions` | | none: stop after N decisions |
+| `--version` | | print the build (branch@commit, clean or not) and exit |
 
 Changing server or port needs no code change:
 
@@ -67,14 +86,17 @@ are gitignored.
 ## Tests
 
 ```sh
-make test              # unit, wire, state handling, survival
+make check             # everything, as CI runs it; writes logs/check-report.json
+make test              # unit, wire, state handling, survival, simulator and server
 make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
 420 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
-the instance from `docker compose up`.
+the instance from `docker compose up`. `.github/workflows/ci.yml` runs
+`scripts/check.py --integration` on every push and pull request and keeps the
+check report, which names the exact commit tested.
 
 Worth knowing: the practice server runs **one fixed script**. It proves the wire
 format, handshake and command set exactly, and it cannot exercise the trading
@@ -94,6 +116,11 @@ bazaar_client/
   policy/      the trading decision
   execution/   actions, sending, evidence log
   autonomous.py         the trading loop
+  strategy.py           strategies selectable by name (--strategy)
+  status.py             the connection/participation status ladder, staleness
+  status_view.py        the human-readable status panel
+  metrics.py            latency percentiles and missed deadlines
+  diagnostics.py        failure categories, hints and exit codes
   scripted_walkthrough.py  the practice exercise replay
 ```
 

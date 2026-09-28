@@ -30,6 +30,7 @@ from bazaar_client.execution.actions import (
     WithdrawAction,
 )
 from bazaar_client.execution.evidence import EvidenceLog
+from bazaar_client.version import build_info
 from bazaar_client.execution.executor import Executor
 from bazaar_client.world.commitments import CommitmentTracker
 from bazaar_client.world.counterparties import CounterpartyModel
@@ -387,4 +388,15 @@ async def run_walkthrough(
     config: ClientConfig, evidence_path: Path | None = None
 ) -> WalkthroughResult:
     async with BazaarSession(config) as session:
-        return await ScriptedWalkthrough(session, evidence_path).run()
+        walkthrough = ScriptedWalkthrough(session, evidence_path)
+        walkthrough.evidence.run_start(
+            **build_info(), strategy="scripted-walkthrough", mode="walkthrough",
+            station_id=config.station_id, ws_url=config.ws_url,
+        )
+        walkthrough.evidence.connection_event("connected")
+        result = await walkthrough.run()
+        walkthrough.evidence.connection_event(
+            "closed", detail=f"walkthrough: {len(result.checks) - len(result.failures)}"
+                             f" of {len(result.checks)} checks passed"
+        )
+        return result

@@ -141,11 +141,14 @@ async def test_evidence_log_links_decisions_to_results_and_states(practice_serve
     result = await run_walkthrough(config_for(practice_server, tmp_path), evidence_path)
     assert result.ok
 
-    records = [json.loads(line) for line in evidence_path.read_text().splitlines() if line.strip()]
+    lines = [json.loads(line) for line in evidence_path.read_text().splitlines() if line.strip()]
+    records = [r for r in lines if "action_kind" in r]
+    assert lines[0]["kind"] == "run_start" and lines[0]["build"]
     by_step = {r["step"]: r for r in records}
 
-    # One record per command plus the sync.
+    # One record per command plus the sync, between the connection's open and close.
     assert len(records) == 7
+    assert [r["event"] for r in lines if r.get("kind") == "connection"] == ["connected", "closed"]
 
     advertise = by_step["2"]
     assert advertise["action_kind"] == "advertise"
@@ -183,3 +186,14 @@ async def test_a_second_connection_repeats_the_readiness_exchange(practice_serve
         assert snapshot.snapshot_sequence == 1
         assert ack.ready
         assert snapshot.run_id == ack.run_id
+
+
+async def test_check_mode_joins_and_sends_nothing_but_readiness(practice_server, tmp_path):
+    """The pre-flight for a live server: prove the key and endpoint work without
+    touching the market. The practice server records every message we send."""
+    from bazaar_client.cli import run_check_mode
+
+    assert await run_check_mode(config_for(practice_server, tmp_path)) == 0
+
+    inbound = practice_server.read_report()["inbound"]
+    assert [m["message_type"] for m in inbound] == ["ready"]

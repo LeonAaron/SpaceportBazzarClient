@@ -41,6 +41,66 @@ once, in `domain/types.py`, rather than everywhere:
   methods make it impossible to read an incoming offer backwards.
 - Deadlines are **exclusive**: `expires_tick` 12 means unusable *from* 12.
 
+## The life of an incoming offer
+
+P02 offers us 3 food for 3 water. Every hop, with where it happens and what it
+leaves in the evidence log:
+
+1. **Bytes arrive.** `BazaarConnection.recv_loop`
+   ([ws_client.py:79](bazaar_client/connection/ws_client.py#L79)) decodes the
+   binary frame into a `Snapshot` and queues it. It never calls decision code,
+   so reading continues whatever the strategy is doing.
+2. **The session takes it.** `BazaarSession._consume_events`
+   ([app.py:189](bazaar_client/app.py#L189)) runs it past the lifecycle state
+   machine (stale sequence numbers and wrong runs are rejected here), and
+   `_on_snapshot` ([app.py:224](bazaar_client/app.py#L224)) makes it the
+   current view and timestamps its arrival.
+3. **The loop picks it up.** `TradingLoop.run`
+   ([autonomous.py:132](bazaar_client/autonomous.py#L132)) wakes, updates the
+   status (`participating`), and calls `step`
+   ([autonomous.py:200](bazaar_client/autonomous.py#L200)), which measures how
+   long the state waited (`timing.queue_ms`).
+4. **The decision.** The configured strategy decides on a worker thread, so
+   new states keep arriving meanwhile. For `reserve-trader` that is `decide`,
+   whose `_accept_incoming` ([decide.py:146](bazaar_client/policy/decide.py#L146))
+   asks `evaluate_incoming` ([accept.py:25](bazaar_client/policy/accept.py#L25)):
+   we pay only in our specialty, never more than we get, only for an import,
+   and only from stock above our reserve. This offer passes, so the decision is
+   `AcceptAction(offer_id)` with reason "our specialty for what we import, at
+   least 1:1". Had it failed, `ReserveTrader.explain_passes` would record why.
+5. **The record.** `_log_decision`
+   ([autonomous.py:273](bazaar_client/autonomous.py#L273)) writes the
+   `decision` record ([evidence.py:168](bazaar_client/execution/evidence.py#L168)):
+   `decision_id`, what we held, the offer as `open_offers[]` from our side,
+   the verdict and reasons, any `passed_offers`, and the timings.
+6. **The command.** `Executor.execute`
+   ([executor.py:81](bazaar_client/execution/executor.py#L81)) builds the
+   message (`build_accept`, [mappers.py:515](bazaar_client/domain/mappers.py#L515))
+   and `BazaarSession.send_command` ([app.py:395](bazaar_client/app.py#L395))
+   checks readiness, phase and the tick's quota before the bytes leave.
+7. **The answer.** The `result` resolves the waiting command in `_on_result`
+   ([app.py:256](bazaar_client/app.py#L256)); the executor then waits for a
+   state that contains that exact result (`wait_for_result_snapshot`,
+   [app.py:340](bazaar_client/app.py#L340)). The command record gets the
+   `decision_id`, `request_id`, result code, `transaction_id`, `response_ms`,
+   `confirm_ms`, the inventory after, and `deadline_missed` (processed in a
+   later tick than decided).
+8. **The trade.** The next `decision` record lists it under `new_transactions`.
+
+`python scripts/analyze_evidence.py <log> --offer <offer_id>` prints exactly
+this chain for any offer in a real log.
+
+## Strategies are pluggable
+
+The trading loop, the evidence log and the simulator see only the `Strategy`
+interface ([strategy.py](bazaar_client/strategy.py)): `decide(snapshot,
+memory, commitments, command_budget)` and `explain_passes(snapshot, decision)`.
+`--strategy` picks one by name at startup (`reserve-trader`, the default; or
+`passive`, the never-trading baseline). Transport (`connection/`) and logging
+(`execution/evidence.py`) sit on the other side of that interface, so either
+can change without touching a strategy; `tests/unit/test_layering.py` keeps
+the policy free of protobuf and sockets and the client free of the simulator.
+
 ## The decision API
 
 ```python
@@ -126,6 +186,27 @@ price. A planet kept alive also stays a trading partner. The caps make the
 downside bounded: only when nothing of ours is urgent, only from surplus above
 reserve, at most 20% of it, one gift per tick, with a per-station cooldown.
 
+The broader matched comparison against baselines, across seeds, seats and
+world sizes, is in [BENCHMARKS.md](BENCHMARKS.md).
+
+## Observability and responsiveness
+
+| Question | Where the answer is |
+|---|---|
+| Is it running, connected, authenticated, synchronized, playing? | `status.py`: the status ladder, logged and written as `status` records |
+| Is our view stale? | `StatusTracker.check_stale`: RUNNING with no state for three ticks |
+| Why did it fail to connect? | `diagnostics.py`: configuration / authentication / protocol / network / application, with a hint and exit code |
+| What does the planet look like now? | `status_view.py`: panel every `--status-every` ticks, live file with `--status-file` |
+| Why did it act, wait or pass on an offer? | `decision` records: `verdict`, `reasons`, `wait_reason`, `passed_offers` |
+| How responsive is it? | `metrics.py`: queue, decide, response and confirm latency (p50/p95/max, counts), missed deadlines; in `run_end` and the report |
+| Did it stall? | `ticks_skipped` on a decision; gaps in the decision record in the report |
+
+The strategy runs on a worker thread (`asyncio.to_thread`) in live play, so the
+socket reader keeps receiving states while a strategy computes;
+`states_during_decision` records how many arrived meanwhile.
+`test_states_keep_arriving_while_a_slow_strategy_thinks` shows the difference
+against running it on the event loop.
+
 ## Execution and confirmation
 
 The autonomous loop requests at most one action at a time, using the remaining
@@ -154,15 +235,19 @@ are capped by both TTL and the run's duration.
 | Policy | `tests/unit/test_policy_*.py`, `test_decide_compose.py` — each rule, then the composed decision |
 | Survival | `tests/survival/` — shortage, production dips, permanent failure, three- and nine-planet economies, delayed acceptances and temporary outages |
 | Execution safety | `tests/unit/test_trading_safety.py` — send gates, same-tick quotas, delayed/missing results, confirmation, reconnects, and the full trading loop |
+| Our server | `tests/sim/test_server.py`, `test_economy_rules.py` — every rule on hand-checked examples, over a real socket with our real session |
+| Simulation and benchmarks | `tests/sim/test_world_and_benchmark.py`, `test_orchestrate.py` — balanced production, the success score, reproducible benchmarks, separate client processes trading through our server |
 | End to end | `tests/integration/` — the real practice server, ten scripted steps |
 
 **What the practice server can and cannot prove.** It runs one fixed script, so
 it validates the wire format, the handshake and the full command set precisely —
 and it cannot validate the trading policy at all. Any command other than the
 scripted one ends the exercise as `scenario mismatch`. That is expected, not a
-defect. The policy is therefore covered by unit tests on synthetic snapshots and
-by `tests/survival/test_simulated_run.py`, which models the economy the field
-manual describes and runs this same `decide` for every planet in it.
+defect. The policy is therefore covered by unit tests on synthetic snapshots,
+by `tests/survival/`, which runs this same `decide` for every planet in the
+economy model of `bazaar_sim/economy.py`, and by our own server
+([SIMULATOR.md](SIMULATOR.md)), where separate client processes play full
+multi-tick games over the real protocol.
 
 These simulations are models, not the real game: nine-planet scenarios vary
 response timing and connectivity, but counterparties still derive their terms

@@ -73,6 +73,52 @@ def test_default_endpoint_matches_the_practice_server(monkeypatch):
     assert config_from_args([]).ws_url == DEFAULT_WS_URL
 
 
+# --- evidence logging default ----------------------------------------------
+
+
+def test_trade_mode_auto_defaults_an_evidence_file(monkeypatch):
+    monkeypatch.setenv("BAZAAR_TOKEN", TOKEN)
+
+    config = config_from_args(["--mode", "trade"])
+
+    assert config.evidence_file is not None
+    assert config.evidence_file.parts[:2] == ("logs", "live")
+    assert config.evidence_file.name == "trade-P01-evidence.jsonl"
+
+
+def test_walkthrough_mode_also_gets_an_auto_evidence_file(monkeypatch):
+    monkeypatch.setenv("BAZAAR_TOKEN", TOKEN)
+
+    config = config_from_args(["--mode", "walkthrough"])
+
+    assert config.evidence_file is not None
+    assert config.evidence_file.name == "walkthrough-P01-evidence.jsonl"
+
+
+def test_no_evidence_flag_disables_the_default(monkeypatch):
+    monkeypatch.setenv("BAZAAR_TOKEN", TOKEN)
+
+    config = config_from_args(["--mode", "trade", "--no-evidence"])
+
+    assert config.evidence_file is None
+
+
+def test_explicit_evidence_file_overrides_the_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("BAZAAR_TOKEN", TOKEN)
+    chosen = tmp_path / "custom.jsonl"
+
+    config = config_from_args(["--mode", "trade", "--evidence-file", str(chosen)])
+
+    assert config.evidence_file == chosen
+
+
+def test_check_and_handshake_modes_default_to_no_evidence(monkeypatch):
+    monkeypatch.setenv("BAZAAR_TOKEN", TOKEN)
+
+    assert config_from_args(["--mode", "check"]).evidence_file is None
+    assert config_from_args(["--mode", "handshake"]).evidence_file is None
+
+
 # --- token discovery ------------------------------------------------------
 
 

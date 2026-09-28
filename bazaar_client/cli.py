@@ -166,10 +166,55 @@ async def run(config: ClientConfig) -> int:
         return 0
 
 
+async def run_check_mode(config: ClientConfig) -> int:
+    """Join, confirm readiness, report our planet, and leave without trading.
+
+    Safe against a live server: no advertisement, offer or accept is sent. Each
+    rung of the status ladder is reported as it is reached, so a failure shows
+    exactly how far the client got.
+    """
+    logger.info("status %s: process running", ClientStatus.STARTING.value)
+    async with BazaarSession(config) as session:
+        logger.info("status %s: socket open to %s", ClientStatus.CONNECTED.value, config.ws_url)
+        snapshot = await session.wait_for_snapshot(min_sequence=1)
+        logger.info("status %s: token accepted, first state received", ClientStatus.AUTHENTICATED.value)
+        ack = await session.wait_for_readiness()
+        logger.info("status %s: readiness confirmed", ClientStatus.SYNCHRONIZED.value)
+        me = snapshot.me
+        logger.info(
+            "joined run %s as %s (client build %s): phase %s, tick %d of %d",
+            snapshot.run_id, snapshot.self_station_id, build_id(),
+            snapshot.phase.name, snapshot.tick, snapshot.rules.duration_ticks,
+        )
+        logger.info(
+            "specialty %s | health %d | inventory %s | upkeep %s | %d planets",
+            me.specialty.name, me.health, me.inventory.as_dict(),
+            me.upkeep_per_tick.as_dict(), len(snapshot.directory),
+        )
+        if not (ack.ready and ack.snapshot_sequence == snapshot.snapshot_sequence):
+            logger.error("readiness was not confirmed for the snapshot we declared")
+            return 1
+        logger.info("readiness confirmed: this key and endpoint are ready to trade")
+        return 0
+
+
+def _write_run_reports(config: ClientConfig) -> None:
+    """Turn the evidence log just written into a text summary + HTML dashboard."""
+    if config.evidence_file is None:
+        return
+    from bazaar_client.execution.reporting import load_analyzer
+
+    for kind, path in load_analyzer().write_reports(config.evidence_file).items():
+        logger.info("wrote %s: %s", kind, path)
+
+
 async def run_trade_mode(config: ClientConfig) -> int:
     from bazaar_client.autonomous import run_trading
 
-    stats = await run_trading(config, config.evidence_file, config.max_decisions)
+    try:
+        stats = await run_trading(config, config.evidence_file, config.max_decisions)
+    finally:
+        _write_run_reports(config)
     if stats.final_snapshot is None:
         logger.error("no state was ever received")
         return 1
@@ -179,7 +224,10 @@ async def run_trade_mode(config: ClientConfig) -> int:
 async def run_walkthrough_mode(config: ClientConfig) -> int:
     from bazaar_client.scripted_walkthrough import run_walkthrough
 
-    result = await run_walkthrough(config, config.evidence_file)
+    try:
+        result = await run_walkthrough(config, config.evidence_file)
+    finally:
+        _write_run_reports(config)
     for check in result.failures:
         logger.error("[%s] %s: %s", check.step, check.description, check.detail)
     logger.info(
@@ -189,18 +237,24 @@ async def run_walkthrough_mode(config: ClientConfig) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--version" in arguments:
+        print(f"bazaar-client {describe_build()}")
+        return 0
     try:
-        config = config_from_args(argv)
-    except MissingTokenError as exc:
+        config = config_from_args(arguments)
+    except ConfigurationError as exc:
         # Before logging is configured, so write plainly rather than traceback.
-        print(f"configuration error: {exc}", file=sys.stderr)
-        return 2
+        diagnosis = diagnose(exc)
+        print(f"configuration error: {exc}\n  hint: {diagnosis.hint}", file=sys.stderr)
+        return diagnosis.exit_code
 
     secrets = [config.token.reveal()]
     if config.hivemind_key:
         secrets.append(config.hivemind_key.reveal())
     configure_logging(config.log_level, secrets=secrets)
     modes = {
+        "check": run_check_mode,
         "handshake": run,
         "trade": run_trade_mode,
         "walkthrough": run_walkthrough_mode,
@@ -211,8 +265,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        logger.error("client failed: %s", exc)
-        return 1
+        diagnosis = diagnose(exc)
+        logger.error("client failed %s", diagnosis)
+        if diagnosis.kind is FailureKind.APPLICATION:
+            logger.debug("traceback", exc_info=True)
+        return diagnosis.exit_code
 
 
 if __name__ == "__main__":

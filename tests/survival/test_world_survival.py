@@ -22,19 +22,17 @@ from __future__ import annotations
 import pytest
 
 from bazaar_client.domain.types import Resource
-from tests.survival.strategies import (
-    RUN_TICKS,
+from bazaar_sim.opponents import (
     Gifter,
     Greedy,
     OurPolicy,
     Passive,
     Quitter,
     SmallFair,
-    WorldOutcome,
     lineup,
     run_two_opponents,
-    run_world,
 )
+from bazaar_sim.world import RUN_TICKS, WorldOutcome, run_world
 
 PHASE_OFFSETS = (0, 1, 2)
 MAX_WORLD_SCORE = 9 * RUN_TICKS

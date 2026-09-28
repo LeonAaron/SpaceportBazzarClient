@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 SUBPROTOCOL = "bazaar.protobuf.v2"
@@ -18,7 +19,11 @@ DEFAULT_CREDENTIALS_FILE = Path("validation-credentials.json")
 DEFAULT_STATION_ID = "P01"
 
 
-class MissingTokenError(RuntimeError):
+class ConfigurationError(RuntimeError):
+    """Our own settings are wrong; nothing the server does can fix it."""
+
+
+class MissingTokenError(ConfigurationError):
     """Raised when no token was supplied and none could be discovered."""
 
 
@@ -164,7 +169,13 @@ def build_parser() -> argparse.ArgumentParser:
             if os.environ.get("BAZAAR_EVIDENCE_FILE")
             else None
         ),
-        help="path for the JSONL decision log",
+        help="path for the JSONL decision log (default: auto-timestamped under "
+             "logs/live/ for trade/walkthrough modes; see --no-evidence)",
+    )
+    parser.add_argument(
+        "--no-evidence",
+        action="store_true",
+        help="disable the automatic evidence log for trade/walkthrough modes",
     )
     parser.add_argument(
         "--max-decisions",
@@ -186,7 +197,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(argv: list[str] | None = None) -> ClientConfig:
+    from bazaar_client.strategy import STRATEGIES
+
     args = build_parser().parse_args(argv)
+    if args.strategy not in STRATEGIES:
+        raise ConfigurationError(
+            f"unknown strategy {args.strategy!r}; choose one of: {', '.join(sorted(STRATEGIES))}"
+        )
+    if args.status_every < 0:
+        raise ConfigurationError("--status-every must be 0 (off) or a positive number of ticks")
+    evidence_file = args.evidence_file
+    if evidence_file is None and not args.no_evidence and args.mode in ("trade", "walkthrough"):
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        evidence_file = Path("logs") / "live" / stamp / f"{args.mode}-{args.station_id}-evidence.jsonl"
     return ClientConfig(
         ws_url=args.ws_url,
         token=resolve_token(args.token, args.station_id, args.credentials_file),
@@ -194,7 +217,7 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         run_id_file=args.run_id_file,
         log_level=args.log_level,
         mode=args.mode,
-        evidence_file=args.evidence_file,
+        evidence_file=evidence_file,
         max_decisions=args.max_decisions,
         hivemind_endpoint=args.hivemind_endpoint,
         hivemind_key=Secret(args.hivemind_key) if args.hivemind_key else None,

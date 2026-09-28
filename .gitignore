@@ -1,8 +1,12 @@
 /validation-credentials.json
 /validation-report.json
+/sim-credentials.json
+/sim-report.json
 /bazaar_pb2.py
 __pycache__/
 *.py[cod]
 .venv/
 .coverage
+.coverage.*
 .pytest_cache/
+/logs/

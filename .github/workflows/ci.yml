@@ -1,0 +1,44 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install protoc and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          pip install -r requirements-dev.txt
+
+      - name: Generate protobuf bindings
+        run: bash scripts/gen_proto.sh
+
+      - name: Install the practice server
+        run: sudo install -m 0755 bazaar-protobuf-starter-linux/spaceport-validate-linux-x86_64 /usr/local/bin/bazaar-server
+
+      - name: Run every check
+        run: python scripts/check.py --integration
+
+      - name: Keep the record of what was tested
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-report-${{ github.sha }}
+          path: |
+            logs/check-report.json
+            logs/check/benchmark.md
+            logs/check/sim/server-report.json
+          if-no-files-found: ignore

@@ -9,6 +9,7 @@ reported as "command sent".
 from __future__ import annotations
 
 import logging
+import time
 
 from bazaar_client.app import BazaarSession, CommandBlockedError, CommandOutcome
 from bazaar_client.domain import mappers
@@ -22,10 +23,15 @@ from bazaar_client.execution.actions import (
     WithdrawAction,
 )
 from bazaar_client.execution.evidence import EvidenceLog
+from bazaar_client.metrics import LatencyRecorder
 from bazaar_client.world.commitments import CommitmentTracker
 from bazaar_client.world.counterparties import CounterpartyModel
 
 logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(since: float) -> float:
+    return round((time.perf_counter() - since) * 1000, 3)
 
 
 class Executor:
@@ -35,12 +41,18 @@ class Executor:
         evidence: EvidenceLog,
         commitments: CommitmentTracker | None = None,
         counterparties: CounterpartyModel | None = None,
+        latency: LatencyRecorder | None = None,
     ) -> None:
         self._session = session
         self._evidence = evidence
         self._commitments = commitments or CommitmentTracker()
         self._counterparties = counterparties or CounterpartyModel()
+        self._latency = latency or LatencyRecorder()
         self._last_record = None
+
+    @property
+    def latency(self) -> LatencyRecorder:
+        return self._latency
 
     @property
     def commitments(self) -> CommitmentTracker:
@@ -67,11 +79,12 @@ class Executor:
         raise TypeError(f"{type(action).__name__} is not a command action")
 
     async def execute(
-        self, action: Action, request_id: str, step: str = "", timeout: float = 15.0
+        self, action: Action, request_id: str, step: str = "", timeout: float = 15.0,
+        decision_id: str | None = None,
     ) -> CommandOutcome:
         """Send one command and record its outcome against the state it came from."""
         observed = self._session.latest_snapshot
-        record = self._evidence.start(step or action.kind, action, observed)
+        record = self._evidence.start(step or action.kind, action, observed, decision_id)
         record.request_id = request_id
         self._last_record = record
 
@@ -83,15 +96,21 @@ class Executor:
             self._commitments.register_inflight(request_id, action.give)
 
         try:
+            sent = time.perf_counter()
             outcome = await self._session.send_command(
                 message, kind=action.kind, request_id=request_id, timeout=timeout
             )
+            record.response_ms = _elapsed_ms(sent)
+            self._latency.record("response", record.response_ms)
             self._record_outcome(record, outcome)
             if not outcome.ok:
                 self._commitments.resolve_inflight(request_id)
             confirmed = None
             if outcome.result is not None:
+                answered = time.perf_counter()
                 confirmed = await self._session.wait_for_result_snapshot(outcome.result, timeout)
+                record.confirm_ms = _elapsed_ms(answered)
+                self._latency.record("confirm", record.confirm_ms)
             self._commitments.resolve_inflight(request_id)
             self._evidence.complete(record, confirmed)
             self._last_record = None
@@ -112,6 +131,11 @@ class Executor:
             record.result_code = outcome.result.code.name
             record.object_id = outcome.result.object_id
             record.transaction_id = outcome.result.transaction_id
+            record.processed_tick = outcome.result.processed_tick
+            if record.observed_tick is not None:
+                # Processed in a later tick than decided: it acted on an old world.
+                record.deadline_missed = outcome.result.processed_tick > record.observed_tick
+                self._latency.note_deadline(record.deadline_missed)
             if not outcome.result.ok:
                 logger.warning(
                     "%s was rejected: %s", record.action_kind, outcome.result.code.name

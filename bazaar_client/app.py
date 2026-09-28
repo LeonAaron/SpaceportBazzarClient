@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -34,6 +35,7 @@ from bazaar_client.connection.ws_client import (
 from bazaar_client.domain import mappers
 from bazaar_client.domain.types import (
     CommandResult,
+    ControlCode,
     ProtocolErrorEvent,
     ReadinessAck,
     ResultCode,
@@ -55,6 +57,10 @@ class CommandBlockedError(RuntimeError):
 
 class SessionAbortedError(RuntimeError):
     """Raised on a control error that retrying cannot fix."""
+
+    def __init__(self, message: str, code: ControlCode | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,12 +106,14 @@ class BazaarSession:
         # Several states can arrive back to back, so keep recent ones
         # individually retrievable rather than only the newest.
         self._by_sequence: dict[int, Snapshot] = {}
+        self._received_at: dict[int, float] = {}
         self._snapshot_waiters: list[tuple[int, asyncio.Future]] = []
         self._command_waiters: dict[str, asyncio.Future] = {}
         self._readiness: ReadinessAck | None = None
         self._readiness_waiter: asyncio.Future | None = None
         self._closed = asyncio.Event()
         self._abort_reason: str | None = None
+        self._abort_code: ControlCode | None = None
         self._reconnect_wanted = False
 
     # --- properties -------------------------------------------------------
@@ -118,6 +126,15 @@ class BazaarSession:
     def abort_reason(self) -> str | None:
         """Set when a control error means retrying cannot help."""
         return self._abort_reason
+
+    @property
+    def abort_code(self) -> ControlCode | None:
+        """The control code behind `abort_reason`, when the server gave one."""
+        return self._abort_code
+
+    def received_at(self, sequence: int) -> float | None:
+        """When the state with this sequence was received (time.perf_counter), if still held."""
+        return self._received_at.get(sequence)
 
     @property
     def reconnect_wanted(self) -> bool:
@@ -152,6 +169,7 @@ class BazaarSession:
     async def start(self) -> None:
         self._readiness = None  # every connection needs its own readiness exchange
         self._by_sequence.clear()  # sequences restart at 1 on a new connection
+        self._received_at.clear()
         await self._connection.connect()
         self._lifecycle.on_connected()
         self._recv_task = asyncio.create_task(
@@ -215,9 +233,11 @@ class BazaarSession:
 
         self._latest = snapshot
         self._by_sequence[snapshot.snapshot_sequence] = snapshot
+        self._received_at[snapshot.snapshot_sequence] = time.perf_counter()
         if len(self._by_sequence) > SNAPSHOT_HISTORY:
             for stale in sorted(self._by_sequence)[:-SNAPSHOT_HISTORY]:
                 del self._by_sequence[stale]
+                self._received_at.pop(stale, None)
         self._throttle.update_limit(snapshot.rules.new_commands_per_station_per_tick)
         if self._ids is None:
             self._ids = RequestIdGenerator(snapshot.self_station_id, prefix=uuid.uuid4().hex[:12])
@@ -270,7 +290,8 @@ class BazaarSession:
             await self._send_ready(directive)
         elif isinstance(directive, Abort):
             self._abort_reason = directive.reason
-            self._fail_all_waiters(SessionAbortedError(directive.reason))
+            self._abort_code = directive.code
+            self._fail_all_waiters(SessionAbortedError(directive.reason, directive.code))
         elif isinstance(directive, Reconnect):
             # close_session means the server considers this session over; reading
             # on lets us act on a connection it has already discarded.
