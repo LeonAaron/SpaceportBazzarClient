@@ -12,11 +12,13 @@ import logging
 import sys
 
 from bazaar_client.app import BazaarSession, CommandOutcome
-from bazaar_client.config import ClientConfig, MissingTokenError, config_from_args
+from bazaar_client.config import ClientConfig, ConfigurationError, config_from_args
+from bazaar_client.diagnostics import FailureKind, diagnose
 from bazaar_client.domain import mappers
 from bazaar_client.domain.types import Phase, Resource, Snapshot
 from bazaar_client.logging_setup import configure_logging
-from bazaar_client.version import build_id
+from bazaar_client.status import ClientStatus
+from bazaar_client.version import build_id, describe_build
 
 logger = logging.getLogger("bazaar_client.cli")
 
@@ -164,10 +166,17 @@ async def run(config: ClientConfig) -> int:
 async def run_check_mode(config: ClientConfig) -> int:
     """Join, confirm readiness, report our planet, and leave without trading.
 
-    Safe against a live server: no advertisement, offer or accept is sent.
+    Safe against a live server: no advertisement, offer or accept is sent. Each
+    rung of the status ladder is reported as it is reached, so a failure shows
+    exactly how far the client got.
     """
+    logger.info("status %s: process running", ClientStatus.STARTING.value)
     async with BazaarSession(config) as session:
-        snapshot, ack = await session.handshake()
+        logger.info("status %s: socket open to %s", ClientStatus.CONNECTED.value, config.ws_url)
+        snapshot = await session.wait_for_snapshot(min_sequence=1)
+        logger.info("status %s: token accepted, first state received", ClientStatus.AUTHENTICATED.value)
+        ack = await session.wait_for_readiness()
+        logger.info("status %s: readiness confirmed", ClientStatus.SYNCHRONIZED.value)
         me = snapshot.me
         logger.info(
             "joined run %s as %s (client build %s): phase %s, tick %d of %d",
@@ -209,12 +218,17 @@ async def run_walkthrough_mode(config: ClientConfig) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--version" in arguments:
+        print(f"bazaar-client {describe_build()}")
+        return 0
     try:
-        config = config_from_args(argv)
-    except MissingTokenError as exc:
+        config = config_from_args(arguments)
+    except ConfigurationError as exc:
         # Before logging is configured, so write plainly rather than traceback.
-        print(f"configuration error: {exc}", file=sys.stderr)
-        return 2
+        diagnosis = diagnose(exc)
+        print(f"configuration error: {exc}\n  hint: {diagnosis.hint}", file=sys.stderr)
+        return diagnosis.exit_code
 
     configure_logging(config.log_level, secrets=[config.token.reveal()])
     modes = {
@@ -228,8 +242,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
-        logger.error("client failed: %s", exc)
-        return 1
+        diagnosis = diagnose(exc)
+        logger.error("client failed %s", diagnosis)
+        if diagnosis.kind is FailureKind.APPLICATION:
+            logger.debug("traceback", exc_info=True)
+        return diagnosis.exit_code
 
 
 if __name__ == "__main__":

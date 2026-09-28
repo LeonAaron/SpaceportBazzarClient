@@ -48,6 +48,29 @@ def test_only_the_codec_boundary_imports_protobuf():
     assert not offenders, f"protobuf leaked outside the codec boundary: {offenders}"
 
 
+SIM_ROOT = PACKAGE_ROOT.parent / "bazaar_sim"
+
+
+def test_the_server_keeps_protobuf_behind_its_own_codec():
+    offenders = [
+        str(path.relative_to(SIM_ROOT)) for path in sorted(SIM_ROOT.rglob("*.py"))
+        if path.name != "codec.py"
+        and any(name.startswith("bazaar_pb2") for name in imported_modules(path.read_text()))
+    ]
+
+    assert not offenders, f"protobuf leaked outside bazaar_sim/codec.py: {offenders}"
+
+
+def test_the_client_never_depends_on_the_simulator():
+    """The client must run in a class game with nothing of ours on the other end."""
+    offenders = [
+        str(path.relative_to(PACKAGE_ROOT)) for path in python_files()
+        if any(name.startswith("bazaar_sim") for name in imported_modules(path.read_text()))
+    ]
+
+    assert not offenders, f"bazaar_client imports bazaar_sim: {offenders}"
+
+
 def test_policy_and_world_layers_never_import_the_connection_layer():
     """Decision code must stay runnable without a socket."""
     offenders = []

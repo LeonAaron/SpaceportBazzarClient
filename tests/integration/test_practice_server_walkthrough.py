@@ -142,7 +142,8 @@ async def test_evidence_log_links_decisions_to_results_and_states(practice_serve
     assert result.ok
 
     lines = [json.loads(line) for line in evidence_path.read_text().splitlines() if line.strip()]
-    records = [r for r in lines if r.get("kind") != "connection"]
+    records = [r for r in lines if "action_kind" in r]
+    assert lines[0]["kind"] == "run_start" and lines[0]["build"]
     by_step = {r["step"]: r for r in records}
 
     # One record per command plus the sync, between the connection's open and close.

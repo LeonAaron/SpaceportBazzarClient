@@ -1,0 +1,10 @@
+{
+  "description": "Food is down to 2 and P02 advertises food for water: we offer water for food, one-for-one, to P02.",
+  "tick": 0,
+  "specialty": "WATER",
+  "inventory": {"water": 40, "food": 2, "components": 30},
+  "advertisements": [
+    {"station": "P02", "selling": ["FOOD"], "seeking": ["WATER"], "expires_tick": 99}
+  ],
+  "expect": {"offers_to": ["P02"], "pays_only_with": "WATER"}
+}

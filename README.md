@@ -4,10 +4,22 @@ A Python client for the Spaceport Bazaar trading simulation. It connects over
 WebSocket, speaks binary Protobuf, keeps its planet supplied, and trades with
 the other planets.
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — design, the trading policy, and what the
-  tests do and do not prove
+- [ARCHITECTURE.md](ARCHITECTURE.md) — design, the trading policy, how an offer
+  moves through the code, and what the tests do and do not prove
+- [SIMULATOR.md](SIMULATOR.md) — our own test server and local simulations:
+  which rules they implement, and what they leave out
+- [BENCHMARKS.md](BENCHMARKS.md) — how strategies are compared, and how a result is reproduced
 - [DOCKER.md](DOCKER.md) — the container workflow
 - [SPECIFICATIONS.md](SPECIFICATIONS.md) — the assignment
+- [SweSpec.md](SweSpec.md) — our engineering self-assessment, with the evidence for each rating
+
+**One command checks everything** (tests, coverage, practice server, a live
+simulation, benchmark reproducibility) and records exactly which revision passed:
+
+```sh
+make check                         # in the container; CI runs the same on every push
+python scripts/check.py --quick    # tests only, anywhere Python and the requirements are installed
+```
 
 ## Setup
 
@@ -52,6 +64,11 @@ environment variable, flag winning:
 | `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | none |
 | `--log-level` | `BAZAAR_LOG_LEVEL` | `INFO` |
 | `--mode` | `BAZAAR_MODE` | `trade` (also `check`, `handshake`, `walkthrough`) |
+| `--strategy` | `BAZAAR_STRATEGY` | `reserve-trader` (also `passive`, a never-trading baseline) |
+| `--status-every` | `BAZAAR_STATUS_EVERY` | `10`: log a status panel every N ticks, `0` off |
+| `--status-file` | `BAZAAR_STATUS_FILE` | none: rewrite this file with the live panel (`.html` auto-refreshes) |
+| `--max-decisions` | | none: stop after N decisions |
+| `--version` | | print the build (branch@commit, clean or not) and exit |
 
 Changing server or port needs no code change:
 
@@ -67,6 +84,31 @@ are gitignored.
 `make` is not installed on Windows by default. Every Makefile target is a thin
 wrapper, so run the command behind it directly, for example
 `docker compose exec -T bazaar python -m bazaar_client.cli --mode trade ...`.
+
+### Is it working? Status, and what a failure means
+
+The client reports where it is on this ladder, in the log and in the evidence
+file, so "running", "connected" and "playing" are never confused:
+
+`starting` → `connecting` → `connected` (socket open) → `authenticated` (token
+accepted, first state received) → `synchronized` (readiness confirmed) →
+`waiting` (lobby or pause: idle by design) or `participating` (running and
+deciding every tick) → `finished`. `stale` means the game is running but no new
+state has arrived for three ticks, so our view is out of date; `disconnected`
+means a reconnect is coming. `--mode check` walks the ladder without trading.
+
+Every failure is reported with its category and what to check, and the exit
+code tells scripts which it was:
+
+| Exit | Category | Typical cause | What to check |
+|---|---|---|---|
+| 2 | configuration | no token, bad `--ws-url`, unknown `--strategy` | the flags and env vars above |
+| 3 | authentication | HTTP 401/403, `INVALID_AUTHENTICATION` | the key; a restarted practice server issues new ones |
+| 4 | protocol | HTTP 400, subprotocol not confirmed, bad message, wrong run | `make proto`; the server's version |
+| 5 | network | refused, unresolvable host, timeout, dropped connection | is the server up? (retried automatically) |
+| 1 | application | a bug in the client | rerun with `--log-level DEBUG`; the evidence log |
+
+Only network failures are retried; the others would fail the same way again.
 
 ### Joining a live run
 
@@ -100,10 +142,22 @@ at startup (`client build main@65468f7bc8a9`), so a run log always says which
 code played. In run 2 the offers on record were ones our committed code cannot
 make, which means an older or modified build was deployed.
 
-Pass `--evidence-file` so the run can be explained afterwards. Alongside one
-record per command, the trading loop writes a `decision` record each tick: health,
-inventory, import targets, spare specialty, open offers, and every action with
-its reason.
+Pass `--evidence-file` so the run can be explained afterwards. It is JSONL, one
+record per line, written and closed as it happens so it survives a crash; a
+restart renames the previous file rather than overwriting it. A run is framed by
+`run_start` (build, clean or not, strategy, configuration) and `run_end`
+(counts, latency percentiles, seconds per status). In between: `status` and
+`connection` changes, a `decision` record each tick (what the strategy saw,
+including open offers and newly settled trades; whether it acted or waited and
+why; why each incoming offer was passed over; how long the state waited and the
+decision took) and one record per command (its `decision_id`, `request_id`,
+result, the offer or transaction it created, response and confirmation times,
+and whether it missed its tick). Those ids connect every step of an offer.
+
+For a live view during the run, add `--status-file logs/status.html` and open
+it in a browser: it refreshes itself with reserves against targets, pending
+actions, open offers and recent trades. The same panel is logged every
+`--status-every` ticks.
 
 ### Analysing a Directorate run log
 
@@ -127,8 +181,11 @@ any later one:
 python scripts/analyze_evidence.py logs/live-evidence.jsonl --html logs/report.html
 ```
 
-Printed to the terminal: decisions logged, commands by kind, rejections by
-code, trades settled, connection uptime/downtime, and a stock/health timeline.
+Printed to the terminal: the build and strategy, decisions logged, commands by
+kind, rejections by code, completed trades, connection uptime/downtime and gaps
+in the decision record, shortages, responsiveness (p50/p95/max per stage and
+missed deadlines), acting versus waiting and why, stalls, time per status, and a
+stock/health timeline.
 
 `--html` additionally writes a self-contained, offline dashboard — open
 `logs/report.html` directly in a browser, no server needed:
@@ -136,24 +193,79 @@ code, trades settled, connection uptime/downtime, and a stock/health timeline.
 - health and stock over time, hoverable, click a point to jump to that tick
 - a connection timeline showing when we were connected vs. not
 - commands-by-kind and rejections-by-code bar charts
+- responsiveness per stage, participation and the status history, completed trades
 - a searchable, filterable **stimuli &rarr; decision &rarr; outcome** table:
-  what the policy saw, what it decided and why, and what the server answered,
-  per tick
+  what the policy saw, what it decided and why (or why it waited), which offers
+  it passed over and why, and what the server answered, per tick
+
+To reconstruct one offer end to end -- what we knew, what we decided and why,
+what we sent, what the server confirmed, whether it became a trade:
+
+```sh
+python scripts/analyze_evidence.py logs/live-evidence.jsonl --offer offer-37
+```
 
 Like `analyze_run.py`, it needs only the Python standard library and no
 network access, so it also works outside the container and offline.
 
+### Checking one decision without a server
+
+```sh
+python scripts/decide_once.py scenarios/unfair-offer.json
+python scripts/decide_once.py scenarios/incoming-gift.json --strategy passive
+```
+
+A scenario file is a planet state plus the market, and an `expect` block; the
+command prints the decision, its reasons and every pass, and exits non-zero if
+the decision is not what the file expects. Every file in `scenarios/` is also a test.
+
+## Our own server and local simulations
+
+The practice server plays one fixed script. To play real, multi-tick games we
+run our own server, which speaks the same protocol (details in
+[SIMULATOR.md](SIMULATOR.md)):
+
+```sh
+# a server plus N separate client processes; logs, evidence and dashboards per planet
+python -m bazaar_sim.orchestrate --planets 5 --ticks 60 --tick-ms 300
+python -m bazaar_sim.orchestrate --planets 3 --strategies reserve-trader:2,passive:1
+
+# just the server; point any client at it (ours, or another pair's)
+python -m bazaar_sim.server --planets 3 --port 3100 --credentials-file sim-credentials.json
+python -m bazaar_client.cli --ws-url ws://127.0.0.1:3100/ws --credentials-file sim-credentials.json --station-id P02
+python -m bazaar_sim.server --planets 9 --open-auth    # ignore keys, seat planets in connection order
+```
+
+Production is balanced by default: for every resource the world makes exactly
+what it consumes. The server writes a scored report when the run ends.
+
+## Comparing strategies
+
+```sh
+python -m bazaar_sim.benchmark                                 # matched scenarios x seeds x seats
+python -m bazaar_sim.benchmark --check logs/benchmark.json      # reproduce every row exactly
+```
+
+Success is defined before comparing (collective survival first; see
+[BENCHMARKS.md](BENCHMARKS.md)), every candidate plays identical cases, and
+failed runs are listed, not hidden.
+
 ## Tests
 
 ```sh
-make test              # unit, wire, state handling, survival
+make check             # everything, as CI runs it; writes logs/check-report.json
+make test              # unit, wire, state handling, survival, simulator and server
 make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
-495 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
+639 tests (634 without the practice server); 90% combined statement/branch
+coverage of handwritten code without the integration tests, whose practice
+server also covers the scripted walkthrough. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
-the instance from `docker compose up`.
+the instance from `docker compose up`. `.github/workflows/ci.yml` runs
+`scripts/check.py --integration` on every push and pull request and keeps the
+check report, which names the exact commit tested.
 
 Worth knowing: the practice server runs **one fixed script**. It proves the wire
 format, handshake and command set exactly, and it cannot exercise the trading
@@ -177,11 +289,28 @@ bazaar_client/
   policy/      the trading decision
   execution/   actions, sending, evidence log
   autonomous.py         the trading loop
+  strategy.py           strategies selectable by name (--strategy)
+  status.py             the connection/participation status ladder, staleness
+  status_view.py        the human-readable status panel
+  metrics.py            latency percentiles and missed deadlines
+  diagnostics.py        failure categories, hints and exit codes
   scripted_walkthrough.py  the practice exercise replay
-  version.py            which build is running
+  version.py            which build is running, clean or not
+bazaar_sim/
+  economy.py            the rule engine: production, upkeep, health, settlement
+  server.py             our Bazaar server over the real protocol
+  codec.py              the server's protobuf boundary
+  orchestrate.py        server + N client processes, one command
+  opponents.py          stand-ins for the clients seen in run 2
+  world.py              whole-world runs, balanced production, the success score
+  benchmark.py          matched comparisons, reproducibility check
+scenarios/              example situations with the decision each expects
 scripts/
   gen_proto.sh          protobuf codegen
+  check.py              every check in one command
   analyze_run.py        summarise a Directorate run log
+  analyze_evidence.py   summarise our own evidence log; HTML dashboard; one offer's story
+  decide_once.py        one decision from a scenario file, no server
 ```
 
 After dependency or Dockerfile changes, rebuild the running service with

@@ -41,6 +41,66 @@ once, in `domain/types.py`, rather than everywhere:
   methods make it impossible to read an incoming offer backwards.
 - Deadlines are **exclusive**: `expires_tick` 12 means unusable *from* 12.
 
+## The life of an incoming offer
+
+P02 offers us 3 food for 3 water. Every hop, with where it happens and what it
+leaves in the evidence log:
+
+1. **Bytes arrive.** `BazaarConnection.recv_loop`
+   ([ws_client.py:79](bazaar_client/connection/ws_client.py#L79)) decodes the
+   binary frame into a `Snapshot` and queues it. It never calls decision code,
+   so reading continues whatever the strategy is doing.
+2. **The session takes it.** `BazaarSession._consume_events`
+   ([app.py:189](bazaar_client/app.py#L189)) runs it past the lifecycle state
+   machine (stale sequence numbers and wrong runs are rejected here), and
+   `_on_snapshot` ([app.py:224](bazaar_client/app.py#L224)) makes it the
+   current view and timestamps its arrival.
+3. **The loop picks it up.** `TradingLoop.run`
+   ([autonomous.py:132](bazaar_client/autonomous.py#L132)) wakes, updates the
+   status (`participating`), and calls `step`
+   ([autonomous.py:200](bazaar_client/autonomous.py#L200)), which measures how
+   long the state waited (`timing.queue_ms`).
+4. **The decision.** The configured strategy decides on a worker thread, so
+   new states keep arriving meanwhile. For `reserve-trader` that is `decide`,
+   whose `_accept_incoming` ([decide.py:146](bazaar_client/policy/decide.py#L146))
+   asks `evaluate_incoming` ([accept.py:25](bazaar_client/policy/accept.py#L25)):
+   we pay only in our specialty, never more than we get, only for an import,
+   and only from stock above our reserve. This offer passes, so the decision is
+   `AcceptAction(offer_id)` with reason "our specialty for what we import, at
+   least 1:1". Had it failed, `ReserveTrader.explain_passes` would record why.
+5. **The record.** `_log_decision`
+   ([autonomous.py:273](bazaar_client/autonomous.py#L273)) writes the
+   `decision` record ([evidence.py:168](bazaar_client/execution/evidence.py#L168)):
+   `decision_id`, what we held, the offer as `open_offers[]` from our side,
+   the verdict and reasons, any `passed_offers`, and the timings.
+6. **The command.** `Executor.execute`
+   ([executor.py:81](bazaar_client/execution/executor.py#L81)) builds the
+   message (`build_accept`, [mappers.py:515](bazaar_client/domain/mappers.py#L515))
+   and `BazaarSession.send_command` ([app.py:395](bazaar_client/app.py#L395))
+   checks readiness, phase and the tick's quota before the bytes leave.
+7. **The answer.** The `result` resolves the waiting command in `_on_result`
+   ([app.py:256](bazaar_client/app.py#L256)); the executor then waits for a
+   state that contains that exact result (`wait_for_result_snapshot`,
+   [app.py:340](bazaar_client/app.py#L340)). The command record gets the
+   `decision_id`, `request_id`, result code, `transaction_id`, `response_ms`,
+   `confirm_ms`, the inventory after, and `deadline_missed` (processed in a
+   later tick than decided).
+8. **The trade.** The next `decision` record lists it under `new_transactions`.
+
+`python scripts/analyze_evidence.py <log> --offer <offer_id>` prints exactly
+this chain for any offer in a real log.
+
+## Strategies are pluggable
+
+The trading loop, the evidence log and the simulator see only the `Strategy`
+interface ([strategy.py](bazaar_client/strategy.py)): `decide(snapshot,
+memory, commitments, command_budget)` and `explain_passes(snapshot, decision)`.
+`--strategy` picks one by name at startup (`reserve-trader`, the default; or
+`passive`, the never-trading baseline). Transport (`connection/`) and logging
+(`execution/evidence.py`) sit on the other side of that interface, so either
+can change without touching a strategy; `tests/unit/test_layering.py` keeps
+the policy free of protobuf and sockets and the client free of the simulator.
+
 ## The decision API
 
 ```python
@@ -176,7 +236,7 @@ built up in the 5–6 unit phases pays for imports through them.
 
 `tests/survival/test_world_survival.py` plays full 120-tick runs under run 2's
 conditions against stand-ins for the clients seen in that run
-(`tests/survival/strategies.py`): one that never connected, the greedy build,
+(`bazaar_sim/opponents.py`): one that never connected, the greedy build,
 small one-for-one traders, one that quit at tick 45, and one that gave its stock
 away. "World score" is planet-ticks lived across all nine planets (at most 1,080).
 
@@ -194,6 +254,27 @@ Every level of adoption beats the run-2 field, and full adoption beats every
 mix. The tests were checked to fail when a weaker client stands in for ours, or
 when the import target is set back to 20. What they cannot show is how other
 teams' real clients will behave; the next class run is the real test.
+
+The broader matched comparison against baselines, across seeds, seats and
+world sizes, is in [BENCHMARKS.md](BENCHMARKS.md).
+
+## Observability and responsiveness
+
+| Question | Where the answer is |
+|---|---|
+| Is it running, connected, authenticated, synchronized, playing? | `status.py`: the status ladder, logged and written as `status` records |
+| Is our view stale? | `StatusTracker.check_stale`: RUNNING with no state for three ticks |
+| Why did it fail to connect? | `diagnostics.py`: configuration / authentication / protocol / network / application, with a hint and exit code |
+| What does the planet look like now? | `status_view.py`: panel every `--status-every` ticks, live file with `--status-file` |
+| Why did it act, wait or pass on an offer? | `decision` records: `verdict`, `reasons`, `wait_reason`, `passed_offers` |
+| How responsive is it? | `metrics.py`: queue, decide, response and confirm latency (p50/p95/max, counts), missed deadlines; in `run_end` and the report |
+| Did it stall? | `ticks_skipped` on a decision; gaps in the decision record in the report |
+
+The strategy runs on a worker thread (`asyncio.to_thread`) in live play, so the
+socket reader keeps receiving states while a strategy computes;
+`states_during_decision` records how many arrived meanwhile.
+`test_states_keep_arriving_while_a_slow_strategy_thinks` shows the difference
+against running it on the event loop.
 
 ## Execution and confirmation
 
@@ -224,17 +305,23 @@ are capped by both TTL and the run's duration.
 | Survival | `tests/survival/` — shortage, production dips, permanent failure, three- and nine-planet economies, delayed acceptances, temporary outages, and a replay of run 2 |
 | World survival | `tests/survival/test_world_survival.py` — full runs against stand-ins for run 2's clients: world score, adoption, and whether our planet outlives every other |
 | Trading rules | `tests/unit/test_trading_invariants.py` — every action across a grid of 192 situations is one-for-one, paid only in specialty, and within the reserve |
-| Logging and tooling | `tests/unit/test_decision_log.py`, `test_analyze_run.py` — decision records, build id, run-log analyzer |
+| Logging and tooling | `tests/unit/test_decision_log.py`, `test_analyze_run.py`, `test_analyze_evidence.py` — evidence records and ids, crash-safe rotation, build id, both analyzers, one offer's story |
+| Observability | `test_status.py`, `test_diagnostics.py`, `test_metrics.py`, `test_trading_loop_observability.py`, `test_version_and_view.py` — status ladder and staleness, failure categories, latency, waits and stalls, reading states while deciding, the status panel |
+| Strategies | `test_strategy.py`, `test_scenarios.py` — selection by name, pass explanations, scenario files checked without a server |
 | Execution safety | `tests/unit/test_trading_safety.py` — send gates, same-tick quotas, delayed/missing results, confirmation, reconnects, and the full trading loop |
+| Our server | `tests/sim/test_server.py`, `test_economy_rules.py` — every rule on hand-checked examples, over a real socket with our real session |
+| Simulation and benchmarks | `tests/sim/test_world_and_benchmark.py`, `test_orchestrate.py` — balanced production, the success score, reproducible benchmarks, separate client processes trading through our server |
 | End to end | `tests/integration/` — the real practice server, ten scripted steps |
 
 **What the practice server can and cannot prove.** It runs one fixed script, so
 it validates the wire format, the handshake and the full command set precisely —
 and it cannot validate the trading policy at all. Any command other than the
 scripted one ends the exercise as `scenario mismatch`. That is expected, not a
-defect. The policy is therefore covered by unit tests on synthetic snapshots and
-by `tests/survival/test_simulated_run.py`, which models the economy the field
-manual describes and runs this same `decide` for every planet in it.
+defect. The policy is therefore covered by unit tests on synthetic snapshots,
+by `tests/survival/`, which runs this same `decide` for every planet in the
+economy model of `bazaar_sim/economy.py`, and by our own server
+([SIMULATOR.md](SIMULATOR.md)), where separate client processes play full
+multi-tick games over the real protocol.
 
 These simulations are models, not the real game: nine-planet scenarios vary
 response timing and connectivity, but counterparties still derive their terms
@@ -242,9 +329,13 @@ from this policy. Settlement and server limits are simulated. It shows the
 policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
-**Coverage** is 94% combined statement/branch coverage over handwritten code
-from all 495 tests, including the practice-server integration tests (`make cov`).
-The generated `bazaar_pb2.py` is excluded (its correctness is covered by the round-trip tests instead), and
-remaining gaps include transport failure paths and supervisor/CLI branches.
+**Coverage** is 90% combined statement/branch coverage over handwritten code
+(`bazaar_client` and `bazaar_sim`) from the 634 tests that run without the
+practice server; `scripted_walkthrough.py` is the largest remaining gap there
+and is exercised by the integration tests (`make cov` includes them). The
+generated `bazaar_pb2.py` is excluded (its correctness is covered by the
+round-trip tests instead). Other gaps are transport failure paths in
+`ws_client.py`, logging setup, and orchestration timeouts.
+`scripts/check.py` fails below 85%.
 The live integration tests exercise the real socket and scripted exchange, but
 an autonomous classroom run with independently written peers remains necessary.

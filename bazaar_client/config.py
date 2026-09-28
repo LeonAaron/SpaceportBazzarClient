@@ -18,7 +18,11 @@ DEFAULT_CREDENTIALS_FILE = Path("validation-credentials.json")
 DEFAULT_STATION_ID = "P01"
 
 
-class MissingTokenError(RuntimeError):
+class ConfigurationError(RuntimeError):
+    """Our own settings are wrong; nothing the server does can fix it."""
+
+
+class MissingTokenError(ConfigurationError):
     """Raised when no token was supplied and none could be discovered."""
 
 
@@ -65,6 +69,9 @@ class ClientConfig:
     mode: str = "trade"
     evidence_file: Path | None = None
     max_decisions: int | None = None
+    strategy: str = "reserve-trader"
+    status_every: int = 10
+    status_file: Path | None = None
 
 
 def read_token_from_credentials(path: Path, station_id: str) -> str:
@@ -171,11 +178,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="stop after this many decisions (useful for a bounded demo run)",
     )
+    parser.add_argument(
+        "--strategy",
+        default=os.environ.get("BAZAAR_STRATEGY", "reserve-trader"),
+        help="decision strategy to run: reserve-trader (default) or passive "
+             "(env: BAZAAR_STRATEGY)",
+    )
+    parser.add_argument(
+        "--status-every",
+        type=int,
+        default=int(os.environ.get("BAZAAR_STATUS_EVERY", "10")),
+        help="log a status panel (reserves, offers, trades) every N ticks; 0 disables",
+    )
+    parser.add_argument(
+        "--status-file",
+        type=Path,
+        default=(
+            Path(os.environ["BAZAAR_STATUS_FILE"])
+            if os.environ.get("BAZAAR_STATUS_FILE")
+            else None
+        ),
+        help="rewrite this file with the live status panel each tick "
+             "(.html auto-refreshes in a browser; anything else is plain text)",
+    )
     return parser
 
 
 def config_from_args(argv: list[str] | None = None) -> ClientConfig:
+    from bazaar_client.strategy import STRATEGIES
+
     args = build_parser().parse_args(argv)
+    if args.strategy not in STRATEGIES:
+        raise ConfigurationError(
+            f"unknown strategy {args.strategy!r}; choose one of: {', '.join(sorted(STRATEGIES))}"
+        )
+    if args.status_every < 0:
+        raise ConfigurationError("--status-every must be 0 (off) or a positive number of ticks")
     return ClientConfig(
         ws_url=args.ws_url,
         token=resolve_token(args.token, args.station_id, args.credentials_file),
@@ -185,4 +223,7 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         mode=args.mode,
         evidence_file=args.evidence_file,
         max_decisions=args.max_decisions,
+        strategy=args.strategy,
+        status_every=args.status_every,
+        status_file=args.status_file,
     )

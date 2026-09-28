@@ -1,5 +1,7 @@
 [run]
-source = bazaar_client
+source =
+    bazaar_client
+    bazaar_sim
 omit =
     bazaar_pb2.py
 

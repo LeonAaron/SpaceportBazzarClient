@@ -145,6 +145,92 @@ def test_ticks_with_no_decision_are_reported_as_gaps():
     assert "no decisions logged for ticks 3..9" in analyze_evidence.report(records)
 
 
+def observed(tick, decision_id, *, actions=(), open_offers=(), trades=(), passed=None, wait=None,
+             timing=None, skipped=None, reasons=("waiting",)):
+    record = decision(tick, 100, bundle(10, 10, 10), actions=actions, reasons=reasons)
+    record.update(decision_id=decision_id, open_offers=list(open_offers),
+                  new_transactions=list(trades), timing=timing or {"queue_ms": 1.0, "decide_ms": 2.0})
+    if passed:
+        record["passed_offers"] = passed
+    if wait:
+        record["wait_reason"] = wait
+    if skipped:
+        record["ticks_skipped"] = skipped
+    return record
+
+
+INCOMING = {"offer_id": "offer-9", "direction": "incoming", "counterparty": "P02",
+            "we_pay": bundle(water=2), "we_get": bundle(food=2), "expires_tick": 8}
+TRADE = {"transaction_id": "txn-4", "offer_id": "offer-9", "counterparty": "P02",
+         "we_paid": bundle(water=2), "we_got": bundle(food=2), "settled_tick": 4}
+
+NEW_STYLE = [
+    {"kind": "run_start", "timestamp": "2026-09-28T10:00:00+00:00", "build": "main@abc",
+     "dirty": False, "strategy": "reserve-trader", "python": "3.12.1"},
+    observed(3, "d1", open_offers=[INCOMING], passed={"offer-9": "worth accepting, but budget"},
+             actions=["advertise"]),
+    {**action("advertise", 3), "decision_id": "d1", "response_ms": 4.0, "confirm_ms": 6.0,
+     "processed_tick": 3, "deadline_missed": False},
+    observed(4, "d2", open_offers=[INCOMING], actions=["accept"],
+             reasons=("accept offer-9: our specialty for what we import",)),
+    {**action("accept", 4), "decision_id": "d2", "action": {"offer_id": "offer-9"},
+     "transaction_id": "txn-4", "inventory_after": bundle(8, 12, 10), "response_ms": 8.0,
+     "confirm_ms": 2.0, "processed_tick": 5, "deadline_missed": True},
+    observed(5, "d3", trades=[TRADE], wait="nothing met the strategy's criteria to act"),
+    observed(9, "d4", wait="no command slot is available this tick", skipped=3),
+    {"kind": "run_end", "timestamp": "2026-09-28T10:01:00+00:00",
+     "status_seconds": {"participating": 58.0, "stale": 2.0}},
+]
+
+
+def test_the_story_of_an_incoming_offer_runs_from_knowledge_to_settlement():
+    story = analyze_evidence.offer_story(NEW_STYLE, "offer-9")
+
+    assert [line.split()[0] for line in story] == [
+        "knew", "passed", "decided", "sent", "server", "settled"]
+    assert "P02 offers us 0,2,0 for 2,0,0" in story[0]
+    assert "worth accepting, but budget" in story[1]
+    assert "our specialty for what we import" in story[2]
+    assert "txn-4" in story[4] and "8,12,10" in story[4]
+
+
+def test_an_unknown_offer_says_so():
+    assert analyze_evidence.offer_story(NEW_STYLE, "offer-404") == ["offer-404 does not appear in this log"]
+
+
+def test_responsiveness_is_measured_per_stage_with_deadlines():
+    speed = analyze_evidence.responsiveness(NEW_STYLE)
+
+    assert set(speed["series"]) == {"queue", "decide", "response", "confirm"}
+    assert speed["series"]["response"] == {"count": 2, "p50": 4.0, "p95": 8.0, "max": 8.0}
+    assert (speed["missed_deadlines"], speed["deadline_checks"]) == (1, 2)
+
+
+def test_participation_separates_acting_waiting_and_stalling():
+    active = analyze_evidence.participation(NEW_STYLE)
+
+    assert (active["acted"], active["waited"]) == (2, 2)
+    assert active["wait_reasons"] == {"nothing met the strategy's criteria to act": 1,
+                                      "no command slot is available this tick": 1}
+    assert active["skipped_ticks"] == [(9, 3)]
+    assert active["status_seconds"] == {"participating": 58.0, "stale": 2.0}
+
+
+def test_every_completed_trade_is_listed_once_whoever_accepted():
+    assert analyze_evidence.completed_trades(NEW_STYLE + [observed(10, "d5", trades=[TRADE])]) == [TRADE]
+
+
+def test_the_new_sections_appear_in_the_text_and_the_page():
+    text = analyze_evidence.report(NEW_STYLE)
+    page = analyze_evidence.html_report(NEW_STYLE)
+
+    assert text.startswith("build main@abc, clean; strategy reserve-trader")
+    assert "1 trades completed" in text
+    assert "missed deadlines: 1 of 2" in text
+    assert "stalled? 3 tick(s) passed with no decision before tick 9" in text
+    assert "Responsiveness" in page and "Completed trades" in page and "txn-4" in page
+
+
 def test_the_text_report_summarises_the_run():
     out = analyze_evidence.report(RECORDS, every=2)
 

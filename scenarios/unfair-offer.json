@@ -1,0 +1,10 @@
+{
+  "description": "P03 wants 6 of our water for 3 food: it asks more than it gives, so we pass.",
+  "tick": 20,
+  "specialty": "WATER",
+  "inventory": {"water": 50, "food": 20, "components": 20},
+  "incoming_offers": [
+    {"offer_id": "offer-21", "from": "P03", "they_give": {"food": 3}, "they_want": {"water": 6}}
+  ],
+  "expect": {"accepts": [], "passes": {"offer-21": "asks more than it gives"}}
+}

@@ -34,6 +34,11 @@ class CommitmentTracker:
         self._inflight.clear()
 
     @property
+    def inflight_count(self) -> int:
+        """Offers sent but not yet seen in a snapshot or rejected."""
+        return len(self._inflight)
+
+    @property
     def inflight_total(self) -> Bundle:
         total = Bundle.zero()
         for give in self._inflight.values():

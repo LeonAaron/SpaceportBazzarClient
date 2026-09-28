@@ -1,0 +1,10 @@
+{
+  "description": "P02 gives us 3 components for nothing. A gift can only help, but must still be accepted.",
+  "tick": 12,
+  "specialty": "WATER",
+  "inventory": {"water": 30, "food": 30, "components": 30},
+  "incoming_offers": [
+    {"offer_id": "offer-7", "from": "P02", "they_give": {"components": 3}, "they_want": {}}
+  ],
+  "expect": {"accepts": ["offer-7"]}
+}
