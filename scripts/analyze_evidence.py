@@ -369,6 +369,103 @@ def overview(records: list[dict]) -> dict:
     }
 
 
+def shortage_streaks(shortage_rows: list[dict]) -> list[dict]:
+    """Group shortages() rows into consecutive-tick runs."""
+    streaks: list[dict] = []
+    for row in shortage_rows:
+        if streaks and row["tick"] - streaks[-1]["end"] == 1:
+            streak = streaks[-1]
+            streak["end"] = row["tick"]
+            streak["length"] += 1
+            streak["health_lost"] += row["health_lost"]
+            for resource in row["empty"]:
+                if resource not in streak["empty"]:
+                    streak["empty"].append(resource)
+        else:
+            streaks.append({"start": row["tick"], "end": row["tick"], "length": 1,
+                             "health_lost": row["health_lost"], "empty": list(row["empty"])})
+    return streaks
+
+
+def trade_balance(trades: list[dict]) -> dict[str, int]:
+    """Net water/food/components moved: we_got - we_paid, summed across trades."""
+    net = {resource: 0 for resource in RESOURCES}
+    for t in trades:
+        paid, got = t.get("we_paid") or {}, t.get("we_got") or {}
+        for resource in RESOURCES:
+            net[resource] += got.get(resource, 0) - paid.get(resource, 0)
+    return net
+
+
+def key_findings(records: list[dict]) -> list[dict]:
+    """Ranked patterns worth investigating, built from the aggregations above.
+
+    Each finding is a plain dict (an "id", a "severity" of bad/warn/info, and
+    finding-specific numeric fields) with no prose, so the text report and the
+    HTML page each render their own sentence from the same data.
+    """
+    findings: list[dict] = []
+
+    rejections = rejection_summary(records)
+    if rejections:
+        code, count = rejections.most_common(1)[0]
+        total = sum(rejections.values())
+        findings.append({"id": "dominant_rejection", "code": code, "count": count, "total": total,
+                          "severity": "bad" if count / total > 0.5 else "warn"})
+
+    streaks = shortage_streaks(shortages(records))
+    if streaks:
+        worst = max(streaks, key=lambda s: (s["health_lost"], s["length"]))
+        findings.append({"id": "shortage_streak", "severity": "bad", **worst})
+
+    speed = responsiveness(records)
+    if speed["series"]:
+        stage, s = max(speed["series"].items(), key=lambda kv: kv[1]["p95"])
+        findings.append({"id": "slow_stage", "stage": stage, **s,
+                          "severity": "warn" if s["p95"] > 1000 else "info"})
+
+    short = shortages(records)
+    worst_drop = max((s for s in short if s["health_lost"] > 0),
+                      key=lambda s: s["health_lost"], default=None)
+    if worst_drop:
+        findings.append({"id": "health_drop", "severity": "bad", "tick": worst_drop["tick"],
+                          "health": worst_drop["health"], "health_lost": worst_drop["health_lost"]})
+
+    trades = completed_trades(records) or settled_trades(records)
+    if trades and all("we_paid" in t and "we_got" in t for t in trades):
+        findings.append({"id": "trade_balance", "severity": "info", "count": len(trades),
+                          **trade_balance(trades)})
+
+    gaps = decision_gaps(records)
+    if gaps:
+        start, end = max(gaps, key=lambda g: g[1] - g[0])
+        findings.append({"id": "decision_gap", "severity": "warn", "start": start, "end": end,
+                          "length": end - start + 1})
+
+    order = {"bad": 0, "warn": 1, "info": 2}
+    findings.sort(key=lambda f: order[f["severity"]])
+    return findings
+
+
+def _describe_finding(f: dict) -> str:
+    if f["id"] == "dominant_rejection":
+        return f"most failed commands were {f['code']} ({f['count']} of {f['total']} rejections)"
+    if f["id"] == "shortage_streak":
+        span = f"tick {f['start']}" if f["start"] == f["end"] else f"ticks {f['start']}-{f['end']}"
+        return (f"ran out of {', '.join(f['empty'])} for {f['length']} tick(s) straight ({span}), "
+                f"losing {f['health_lost']} health")
+    if f["id"] == "slow_stage":
+        return f"slowest stage was {f['stage']} (p95 {f['p95']}ms over {f['count']} samples)"
+    if f["id"] == "health_drop":
+        return f"biggest single health drop was {f['health_lost']} at tick {f['tick']} (down to {f['health']})"
+    if f["id"] == "trade_balance":
+        parts = ", ".join(f"{f[r]:+d} {r}" for r in RESOURCES)
+        return f"net across {f['count']} trade(s): {parts}"
+    if f["id"] == "decision_gap":
+        return f"no decisions logged for ticks {f['start']}-{f['end']} ({f['length']} ticks)"
+    return f["id"]
+
+
 def report(records: list[dict], every: int = 10) -> str:
     o = overview(records)
     lines = []
@@ -377,6 +474,10 @@ def report(records: list[dict], every: int = 10) -> str:
         dirty = {True: ", uncommitted changes", False: ", clean", None: ""}[header.get("dirty")]
         lines.append(f"build {header.get('build')}{dirty}; strategy {header.get('strategy')}; "
                      f"python {header.get('python')}")
+    findings = key_findings(records)
+    if findings:
+        lines += ["", "key findings:"]
+        lines += [f"  {_describe_finding(f)}" for f in findings]
     if o["decisions"]:
         lines += [
             f"ticks {o['first_tick']}..{o['last_tick']}: {o['decisions']} decisions logged, "
@@ -521,6 +622,7 @@ def _page_data(records: list[dict]) -> dict:
         "actions": dict(action_summary(records)),
         "rejections": dict(rejection_summary(records).most_common()),
         "shortages": shortages(records),
+        "findings": key_findings(records),
     }
 
 
@@ -529,15 +631,36 @@ def html_report(records: list[dict], title: str = "Run report") -> str:
     return HTML_TEMPLATE.replace("__TITLE__", html.escape(title)).replace("__DATA__", data)
 
 
+def write_reports(evidence_path: Path, *, out_dir: Path | None = None,
+                   title: str | None = None) -> dict[str, Path]:
+    """Write a text summary and an HTML dashboard for one evidence log.
+
+    Returns {"summary": path, "dashboard": path}, or {} if the file is missing
+    or empty, so callers can call this unconditionally after a run.
+    """
+    if not evidence_path.exists() or not evidence_path.stat().st_size:
+        return {}
+    records = load(evidence_path)
+    out_dir = out_dir or evidence_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = evidence_path.stem.removesuffix("-evidence")
+    summary_path = out_dir / f"{stem}-summary.txt"
+    dashboard_path = out_dir / f"{stem}-dashboard.html"
+    summary_path.write_text(report(records), encoding="utf-8")
+    dashboard_path.write_text(html_report(records, title or f"Run report: {evidence_path.name}"),
+                               encoding="utf-8")
+    return {"summary": summary_path, "dashboard": dashboard_path}
+
+
 HTML_TEMPLATE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>__TITLE__</title>
 <style>
 :root{--bg:#f7f7f5;--panel:#fff;--ink:#1d1d1b;--muted:#6b6b66;--line:#e2e2dc;
---water:#2f6fb3;--food:#3f8f4a;--components:#b0702a;--health:#b3303a;--ok:#3f8f4a;--bad:#b3303a;--down:#b3303a;--up:#3f8f4a}
+--water:#2f6fb3;--food:#3f8f4a;--components:#b0702a;--health:#b3303a;--ok:#3f8f4a;--bad:#b3303a;--warn:#a6741c;--down:#b3303a;--up:#3f8f4a}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--panel:#1f1f1d;--ink:#ecece8;--muted:#9a9a93;--line:#34342f;
---water:#6ea6e6;--food:#79c485;--components:#e0a35c;--health:#ef6b73;--ok:#79c485;--bad:#ef6b73;--down:#ef6b73;--up:#79c485}}
+--water:#6ea6e6;--food:#79c485;--components:#e0a35c;--health:#ef6b73;--ok:#79c485;--bad:#ef6b73;--warn:#e3b35c;--down:#ef6b73;--up:#79c485}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif}
 main{max-width:1100px;margin:0 auto;padding:24px 16px 64px}
 h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:0 0 12px}
@@ -561,17 +684,24 @@ th{color:var(--muted);font-weight:600;font-size:12px}td.n{text-align:right;font-
 tr.sel{outline:2px solid var(--water)}
 #tip{position:fixed;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;max-width:320px;box-shadow:0 2px 8px rgba(0,0,0,.15)}
 .empty{color:var(--muted)}
+.finding{border-left:3px solid var(--line);background:var(--bg);padding:8px 12px;border-radius:6px;margin:0 0 8px;font-size:13px}
+.finding:last-child{margin-bottom:0}
+.finding.bad{border-color:var(--bad)}.finding.warn{border-color:var(--warn)}.finding.info{border-color:var(--water)}
+details.panel summary{cursor:pointer;list-style:none;font-weight:600}
+details.panel summary::-webkit-details-marker{display:none}
+details.panel summary h2{display:inline;margin:0}
 </style></head><body><main>
 <h1>__TITLE__</h1>
 <p class="sub" id="sub">Generated from the client's evidence log: what the policy saw, what it decided and why, and what the server answered.</p>
+<section class="panel"><h2>Key findings</h2><div id="findings"></div></section>
 <section class="panel"><div class="kpis" id="kpis"></div></section>
 <section class="panel"><h2>Health and stock by tick</h2><svg id="chart" viewBox="0 0 1000 300"></svg>
-<div class="legend"><span><i style="background:var(--health)"></i>health</span><span><i style="background:var(--water)"></i>water</span><span><i style="background:var(--food)"></i>food</span><span><i style="background:var(--components)"></i>components</span><span>click a tick to jump to its decision</span></div></section>
-<section class="panel"><h2>Connection</h2><div id="conn"></div></section>
-<div class="grid2">
-<section class="panel"><h2>Commands by kind</h2><div id="kinds"></div></section>
-<section class="panel"><h2>Rejected or unanswered commands</h2><div id="rejects"></div></section>
-</div>
+<div class="legend" id="chart-legend"><span data-series="health" style="cursor:pointer"><i style="background:var(--health)"></i>health</span><span data-series="water" style="cursor:pointer"><i style="background:var(--water)"></i>water</span><span data-series="food" style="cursor:pointer"><i style="background:var(--food)"></i>food</span><span data-series="components" style="cursor:pointer"><i style="background:var(--components)"></i>components</span><span>click a tick to jump &middot; click a series to isolate it</span></div></section>
+<details class="panel" id="conn-details"><summary><h2>Connection</h2></summary><div id="conn" style="margin-top:10px"></div></details>
+<details class="panel" id="cmds-details"><summary><h2>Commands &amp; rejections</h2></summary><div class="grid2" style="margin-top:10px">
+<div><h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">By kind</h3><div id="kinds"></div></div>
+<div><h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">Rejected or unanswered</h3><div id="rejects"></div></div>
+</div></details>
 <div class="grid2">
 <section class="panel"><h2>Responsiveness</h2><div id="speed"></div></section>
 <section class="panel"><h2>Participation and status</h2><div id="active"></div></section>
@@ -589,8 +719,20 @@ const dur=s=>{s=Math.round(s);const m=Math.floor(s/60);return m?m+"m"+String(s%6
 const tip=$("#tip");function showTip(e,h){tip.innerHTML=h;tip.style.display="block";tip.style.left=Math.min(e.clientX+12,innerWidth-330)+"px";tip.style.top=(e.clientY+12)+"px"}function hideTip(){tip.style.display="none"}
 const O=D.overview,HD=D.header,SP=D.speed,PA=D.participation;
 if(HD.build)$("#sub").textContent+=` Build ${HD.build}${HD.dirty?" (uncommitted changes)":""}, strategy ${HD.strategy}.`;
-const k=[["Ticks",O.first_tick==null?"-":O.first_tick+"–"+O.last_tick],["Final health",O.final_health??"-"],["Commands sent",O.commands_sent],["Rejected",O.commands_rejected],[O.trades_completed==null?"Trades settled":"Trades completed",O.trades_completed??O.trades_settled],["Downtime",D.periods.length?dur(O.downtime_s):"n/a"],["First shortage",O.first_shortage_tick??"none"],["Health lost",O.health_lost]];
+const k=[["Ticks",O.first_tick==null?"-":O.first_tick+"–"+O.last_tick],["Final health",O.final_health??"-"],[`Commands sent (${O.commands_rejected} rejected)`,O.commands_sent],[O.trades_completed==null?"Trades settled":"Trades completed",O.trades_completed??O.trades_settled],["Downtime",D.periods.length?dur(O.downtime_s):"n/a"]];
 $("#kpis").innerHTML=k.map(([l,v])=>`<div class="kpi"><b>${esc(v)}</b><span>${l}</span></div>`).join("");
+(function findings(){const F=D.findings||[];const el=$("#findings");if(!F.length){el.innerHTML='<p class="empty">No notable patterns in this run.</p>';return}
+const desc=f=>{
+if(f.id=="dominant_rejection")return `Most failed commands were <b>${esc(f.code)}</b> (${f.count} of ${f.total} rejections).`;
+if(f.id=="shortage_streak")return `Ran out of <b>${esc(f.empty.join(", "))}</b> for ${f.length} tick(s) straight (ticks ${f.start}–${f.end}), losing ${f.health_lost} health.`;
+if(f.id=="slow_stage")return `Slowest stage: <b>${esc(f.stage)}</b> (p95 ${f.p95}ms over ${f.count} samples).`;
+if(f.id=="health_drop")return `Biggest single health drop: <b>${f.health_lost}</b> at tick ${f.tick} (down to ${f.health}).`;
+if(f.id=="trade_balance")return `Net across ${f.count} trade(s): `+R.map(r=>`<b>${f[r]>=0?"+":""}${f[r]}</b> ${r}`).join(", ")+".";
+if(f.id=="decision_gap")return `No decisions logged for ticks ${f.start}–${f.end} (${f.length} ticks).`;
+return esc(f.id)};
+el.innerHTML=F.map(f=>{const tick=f.tick??f.start;const clickable=tick!=null&&D.traces.some(t=>t.tick===tick);
+return `<div class="finding ${f.severity}"${clickable?` data-tick="${tick}" style="cursor:pointer"`:""}>${desc(f)}</div>`}).join("");
+el.querySelectorAll("[data-tick]").forEach(d=>d.addEventListener("click",()=>jump(+d.dataset.tick)))})();
 (function speed(){const S=Object.entries(SP.series);const el=$("#speed");if(!S.length){el.innerHTML='<p class="empty">No timings in this log (recorded by newer clients).</p>';return}
 const label={queue:"state waited before deciding",decide:"strategy computing",response:"command sent → answer",confirm:"answer → confirming state"};
 el.innerHTML="<table><tr><th>stage</th><th class='n'>n</th><th class='n'>p50 ms</th><th class='n'>p95 ms</th><th class='n'>max ms</th></tr>"+S.map(([n,s])=>`<tr><td>${esc(n)}<div style="color:var(--muted);font-size:12px">${label[n]||""}</div></td><td class="n">${s.count}</td><td class="n">${s.p50}</td><td class="n">${s.p95}</td><td class="n">${s.max}</td></tr>`).join("")+"</table>"+
@@ -602,21 +744,27 @@ const secs=Object.entries(PA.status_seconds).filter(([,v])=>v>0);if(secs.length)
 if(PA.statuses.length)h+=`<details style="margin-top:8px"><summary>${PA.statuses.length} status changes</summary><table>`+PA.statuses.map(s=>`<tr><td>${esc(s.timestamp.slice(11,23))}</td><td>${esc(s.status)}</td><td style="color:var(--muted)">${esc(s.detail)}</td></tr>`).join("")+"</table></details>";
 el.innerHTML=h})();
 (function trades(){const T=D.trades,el=$("#trades");if(!T.length){el.innerHTML='<p class="empty">No completed trades recorded (older logs only record our own accepts).</p>';return}
-el.innerHTML="<table><tr><th>tick</th><th>trade</th><th>with</th><th>we paid (w/f/c)</th><th>we got (w/f/c)</th></tr>"+T.map(t=>`<tr><td class="n">${t.settled_tick}</td><td>${esc(t.transaction_id)}<div style="color:var(--muted);font-size:12px">${esc(t.offer_id)}</div></td><td>${esc(t.counterparty)}</td><td>${fmt(t.we_paid)}</td><td>${fmt(t.we_got)}</td></tr>`).join("")+"</table>"})();
+const net=R.map(r=>({r,v:T.reduce((s,t)=>s+((t.we_got&&t.we_got[r])||0)-((t.we_paid&&t.we_paid[r])||0),0)}));
+const netStr=net.map(({r,v})=>`${v>=0?"+":""}${v} ${r}`).join(", ");
+el.innerHTML=`<p style="margin:0 0 8px;color:var(--muted)">Net across ${T.length} trade(s): ${netStr}</p>`+
+"<table><tr><th>tick</th><th>trade</th><th>with</th><th>we paid (w/f/c)</th><th>we got (w/f/c)</th></tr>"+T.map(t=>`<tr><td class="n">${t.settled_tick}</td><td>${esc(t.transaction_id)}<div style="color:var(--muted);font-size:12px">${esc(t.offer_id)}</div></td><td>${esc(t.counterparty)}</td><td>${fmt(t.we_paid)}</td><td>${fmt(t.we_got)}</td></tr>`).join("")+"</table>"})();
 const shortTicks=new Set(D.shortages.map(s=>s.tick));
 (function chart(){const T=D.traces.filter(t=>t.health!=null);const svg=$("#chart");if(!T.length){svg.outerHTML='<p class="empty">No policy decisions logged, so there is no stock history to plot. This run\\'s commands are listed in the table below.</p>';return}
 const W=1000,H=300,L=44,Rt=44,Tp=12,B=28,t0=T[0].tick,t1=Math.max(T[T.length-1].tick,t0+1);
 const maxInv=Math.max(1,...T.flatMap(t=>R.map(r=>t.inventory[r]||0)));const maxH=Math.max(100,...T.map(t=>t.health));
 const x=t=>L+(t-t0)/(t1-t0)*(W-L-Rt),yi=v=>H-B-v/maxInv*(H-B-Tp),yh=v=>H-B-v/maxH*(H-B-Tp);
-let s="";for(let i=0;i<=4;i++){const y=Tp+i*(H-B-Tp)/4;s+=`<line x1="${L}" x2="${W-Rt}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${L-6}" y="${y+4}" text-anchor="end">${Math.round(maxInv*(1-i/4))}</text><text x="${W-Rt+6}" y="${y+4}">${Math.round(maxH*(1-i/4))}</text>`}
+let s="";for(let i=0;i<=4;i++){const y=Tp+i*(H-B-Tp)/4;s+=`<line x1="${L}" x2="${W-Rt}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${L-6}" y="${y+4}" text-anchor="end">${Math.round(maxInv*(1-i/4))}</text><text x="${W-Rt+6}" y="${y+4}" fill="var(--health)">${Math.round(maxH*(1-i/4))}</text>`}
 const step=Math.max(1,Math.ceil((t1-t0)/10));for(let t=t0;t<=t1;t+=step)s+=`<text x="${x(t)}" y="${H-8}" text-anchor="middle">${t}</text>`;
 T.filter(t=>shortTicks.has(t.tick)).forEach(t=>s+=`<rect x="${x(t.tick)-1.5}" y="${Tp}" width="3" height="${H-B-Tp}" fill="var(--bad)" opacity=".15"/>`);
 D.gaps.forEach(([a,b])=>{const g0=x(a-1),g1=x(b+1);const lbl=`no decisions logged, ticks ${a}–${b}`;s+=`<rect x="${g0}" y="${Tp}" width="${g1-g0}" height="${H-B-Tp}" fill="var(--muted)" opacity=".12"><title>${lbl}</title></rect>`+(g1-g0>190?`<text x="${(g0+g1)/2}" y="${Tp+16}" text-anchor="middle">${lbl}</text>`:"")});
 const segs=[];let cur=[];T.forEach((t,i)=>{if(i&&t.tick-T[i-1].tick>3){segs.push(cur);cur=[]}cur.push(t)});segs.push(cur);
-const line=(f,c,w)=>segs.map(sg=>`<polyline fill="none" stroke="${c}" stroke-width="${w}" points="${sg.map(t=>x(t.tick).toFixed(1)+","+f(t).toFixed(1)).join(" ")}"/>`).join("");
-R.forEach(r=>s+=line(t=>yi(t.inventory[r]||0),`var(--${r})`,1.8));s+=line(t=>yh(t.health),"var(--health)",2.4);
+const line=(f,c,w,name)=>segs.map(sg=>`<polyline data-series="${name}" fill="none" stroke="${c}" stroke-width="${w}" points="${sg.map(t=>x(t.tick).toFixed(1)+","+f(t).toFixed(1)).join(" ")}"/>`).join("");
+R.forEach(r=>s+=line(t=>yi(t.inventory[r]||0),`var(--${r})`,1.8,r));s+=line(t=>yh(t.health),"var(--health)",2.4,"health");
 s+=`<line id="cross" y1="${Tp}" y2="${H-B}" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/>`;
 s+=`<rect id="hit" x="${L}" y="${Tp}" width="${W-L-Rt}" height="${H-B-Tp}" fill="transparent" style="cursor:crosshair"/>`;svg.innerHTML=s;
+document.querySelectorAll("#chart-legend [data-series]").forEach(sp=>sp.addEventListener("click",()=>{
+const name=sp.dataset.series,dimmed=sp.style.opacity===".5";sp.style.opacity=dimmed?"1":".5";
+svg.querySelectorAll(`polyline[data-series="${name}"]`).forEach(p=>p.style.opacity=dimmed?"1":".08")}));
 const near=e=>{const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const q=p.matrixTransform(svg.getScreenCTM().inverse());let best=T[0];for(const t of T)if(Math.abs(x(t.tick)-q.x)<Math.abs(x(best.tick)-q.x))best=t;return best};
 const hit=$("#hit"),cross=$("#cross");
 hit.addEventListener("mousemove",e=>{const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const at=t0+(p.matrixTransform(svg.getScreenCTM().inverse()).x-L)/(W-L-Rt)*(t1-t0);
@@ -629,10 +777,12 @@ hit.addEventListener("click",e=>jump(near(e).tick))})();
 const a=Date.parse(P[0].start),b=Math.max(a+1,Date.parse(P[P.length-1].end));
 let s=`<svg viewBox="0 0 1000 40">`;P.forEach((p,i)=>{const x0=(Date.parse(p.start)-a)/(b-a)*1000,x1=(Date.parse(p.end)-a)/(b-a)*1000;s+=`<rect data-i="${i}" x="${x0}" y="6" width="${Math.max(2,x1-x0)}" height="22" fill="var(--${p.state})" opacity="${p.state=="up"?.55:.9}"/>`});
 s+=`</svg><div class="legend"><span><i style="background:var(--up)"></i>connected</span><span><i style="background:var(--down)"></i>not connected</span><span>${P.filter(p=>p.state=="down").length} gaps, ${dur(O.downtime_s)} total</span></div>`;el.innerHTML=s;
-el.querySelectorAll("rect").forEach(r=>{const p=P[+r.dataset.i];r.addEventListener("mousemove",e=>showTip(e,`<b>${p.state=="up"?"connected":"not connected"}</b> for ${dur(p.seconds)}<br>${esc(p.start)}${p.detail?"<br>"+esc(p.detail):""}`));r.addEventListener("mouseleave",hideTip)})})();
+el.querySelectorAll("rect").forEach(r=>{const p=P[+r.dataset.i];r.addEventListener("mousemove",e=>showTip(e,`<b>${p.state=="up"?"connected":"not connected"}</b> for ${dur(p.seconds)}<br>${esc(p.start)}${p.detail?"<br>"+esc(p.detail):""}`));r.addEventListener("mouseleave",hideTip)})
+if(O.downtime_s>0)$("#conn-details").open=true})();
 function bars(obj,el,cls){const e=Object.entries(obj);if(!e.length){el.innerHTML='<p class="empty">None.</p>';return}const m=Math.max(...e.map(([,v])=>v));
 el.innerHTML="<table>"+e.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="n">${v}</td><td style="width:50%"><div class="bar ${cls}" style="width:${v/m*100}%"></div></td></tr>`).join("")+"</table>"}
 bars(D.actions,$("#kinds"),"k");bars(D.rejections,$("#rejects"),"");
+if(Object.keys(D.rejections).length)$("#cmds-details").open=true;
 let filter="acted";const tb=$("#traces");
 function row(t){const stim=t.scripted?'<span class="empty">scripted command; no policy state logged</span>':`health ${t.health}<br>stock ${fmt(t.inventory)}<br><span style="color:var(--muted)">want ${fmt(t.targets)} · spare ${t.spendable??"-"} · ${t.open_offers??0} open offers</span>`;
 const dec=(t.decision_id?`<div style="color:var(--muted);font-size:11px">${esc(t.decision_id)}${t.timing?` · decided in ${t.timing.decide_ms}ms`:""}</div>`:"")+(t.actions.length?t.actions.map(a=>`<span class="tag">${esc(a.kind)}</span>`+`<div style="color:var(--muted);font-size:12px">${esc(Object.entries(a).filter(([k])=>k!="kind").map(([k,v])=>k+"="+JSON.stringify(v)).join(" "))}</div>`).join(""):`<span class="empty">wait${t.wait_reason?": "+esc(t.wait_reason):""}</span>`);

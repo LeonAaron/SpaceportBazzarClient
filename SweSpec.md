@@ -160,7 +160,7 @@ Evidence:
 - Q12: `python scripts/decide_once.py scenarios/unfair-offer.json` -- a JSON
   planet state and incoming offer, the decision and its reasons printed, and
   an `expect` block checked; every file in scenarios/ is a test
-  (tests/unit/test_scenarios.py). Plus ~190 policy unit tests on hand-built snapshots.
+  (tests/unit/test_scenarios.py). Plus 136 policy and survival unit tests on hand-built snapshots.
 - Q13: strategies see only the `Strategy` interface; transport (connection/)
   and logging (execution/evidence.py) sit behind it. tests/unit/test_layering.py
   keeps protobuf out of the policy, sockets out of policy/world/domain, and the
@@ -189,12 +189,12 @@ ASSESSMENT QUESTION
     failures from previous simulations into regression tests?                     2
 
 Evidence:
-- Q15: 639 tests: policy decisions, lifecycle transitions, status transitions,
+- Q15: 691 tests: policy decisions, lifecycle transitions, status transitions,
   server rules, failure categories, rejected and unanswered commands.
-- Q16: 90% combined statement/branch coverage of bazaar_client + bazaar_sim
-  without the practice server (bazaar_pb2.py excluded); gaps explained in
-  ARCHITECTURE.md "Coverage" (scripted walkthrough covered by integration tests,
-  transport failure paths, logging setup). check.py fails below 85%.
+- Q16: 97% combined statement/branch coverage of bazaar_client + bazaar_sim
+  (all 691 tests, bazaar_pb2.py excluded); every new module 96-100%. Remaining
+  gaps explained in ARCHITECTURE.md "Coverage" (Secret dunders, transport
+  failure paths, orchestration kill-after-timeout). check.py fails below 85%.
 - Q17: run-2 failures are regression tests (test_run_two_replayed_*, the
   duplicate tick-0 records, reconnect storms); the survival tests were checked
   to fail when a weaker client or the old import target is substituted.

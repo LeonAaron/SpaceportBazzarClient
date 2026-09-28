@@ -329,13 +329,14 @@ from this policy. Settlement and server limits are simulated. It shows the
 policy keeps its planet supplied under scarcity and does not trade itself to
 death; it cannot predict how real opponents will behave.
 
-**Coverage** is 90% combined statement/branch coverage over handwritten code
-(`bazaar_client` and `bazaar_sim`) from the 634 tests that run without the
-practice server; `scripted_walkthrough.py` is the largest remaining gap there
-and is exercised by the integration tests (`make cov` includes them). The
+**Coverage** is 97% combined statement/branch coverage over handwritten code
+(`bazaar_client` and `bazaar_sim`) from all 691 tests (`make cov`, which
+includes the practice-server tests); every module added for observability,
+strategies, the server and benchmarks is at 96-100%. The
 generated `bazaar_pb2.py` is excluded (its correctness is covered by the
-round-trip tests instead). Other gaps are transport failure paths in
-`ws_client.py`, logging setup, and orchestration timeouts.
+round-trip tests instead). Remaining gaps are transport failure paths in
+`ws_client.py`, logging setup, `Secret`'s dunder methods, and the
+orchestrator's kill-after-terminate fallback.
 `scripts/check.py` fails below 85%.
 The live integration tests exercise the real socket and scripted exchange, but
 an autonomous classroom run with independently written peers remains necessary.

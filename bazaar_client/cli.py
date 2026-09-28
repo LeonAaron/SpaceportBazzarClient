@@ -195,10 +195,23 @@ async def run_check_mode(config: ClientConfig) -> int:
         return 0
 
 
+def _write_run_reports(config: ClientConfig) -> None:
+    """Turn the evidence log just written into a text summary + HTML dashboard."""
+    if config.evidence_file is None:
+        return
+    from bazaar_client.execution.reporting import load_analyzer
+
+    for kind, path in load_analyzer().write_reports(config.evidence_file).items():
+        logger.info("wrote %s: %s", kind, path)
+
+
 async def run_trade_mode(config: ClientConfig) -> int:
     from bazaar_client.autonomous import run_trading
 
-    stats = await run_trading(config, config.evidence_file, config.max_decisions)
+    try:
+        stats = await run_trading(config, config.evidence_file, config.max_decisions)
+    finally:
+        _write_run_reports(config)
     if stats.final_snapshot is None:
         logger.error("no state was ever received")
         return 1
@@ -208,7 +221,10 @@ async def run_trade_mode(config: ClientConfig) -> int:
 async def run_walkthrough_mode(config: ClientConfig) -> int:
     from bazaar_client.scripted_walkthrough import run_walkthrough
 
-    result = await run_walkthrough(config, config.evidence_file)
+    try:
+        result = await run_walkthrough(config, config.evidence_file)
+    finally:
+        _write_run_reports(config)
     for check in result.failures:
         logger.error("[%s] %s: %s", check.step, check.description, check.detail)
     logger.info(

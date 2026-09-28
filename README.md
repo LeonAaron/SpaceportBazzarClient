@@ -6,6 +6,7 @@ the other planets.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — design, the trading policy, how an offer
   moves through the code, and what the tests do and do not prove
+- [LOG_FORMAT.md](LOG_FORMAT.md) — the structured log format we propose (Task 7), with examples
 - [SIMULATOR.md](SIMULATOR.md) — our own test server and local simulations:
   which rules they implement, and what they leave out
 - [BENCHMARKS.md](BENCHMARKS.md) — how strategies are compared, and how a result is reproduced
@@ -61,7 +62,8 @@ environment variable, flag winning:
 | `--token` | `BAZAAR_TOKEN` | read from the credentials file |
 | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
 | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
-| `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | none |
+| `--evidence-file` | `BAZAAR_EVIDENCE_FILE` | auto: `logs/live/<UTC timestamp>/<mode>-<station>-evidence.jsonl` for `trade`/`walkthrough`; none for `check`/`handshake` |
+| `--no-evidence` | | off: disables the automatic evidence log for `trade`/`walkthrough` |
 | `--log-level` | `BAZAAR_LOG_LEVEL` | `INFO` |
 | `--mode` | `BAZAAR_MODE` | `trade` (also `check`, `handshake`, `walkthrough`) |
 | `--strategy` | `BAZAAR_STRATEGY` | `reserve-trader` (also `passive`, a never-trading baseline) |
@@ -125,8 +127,9 @@ $env:BAZAAR_TOKEN  = "<your key>"
 # 1. Pre-flight: join, confirm readiness, report our planet, leave. Sends no trades.
 docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode check
 
-# 2. Play: leave this running for the whole run.
-docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode trade --evidence-file logs/live-evidence.jsonl
+# 2. Play: leave this running for the whole run. Evidence logging is automatic
+#    (see "Before a class run"); add --evidence-file to pick the path yourself.
+docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode trade
 ```
 
 `-e NAME` without a value forwards that variable from the terminal into the
@@ -142,17 +145,24 @@ at startup (`client build main@65468f7bc8a9`), so a run log always says which
 code played. In run 2 the offers on record were ones our committed code cannot
 make, which means an older or modified build was deployed.
 
-Pass `--evidence-file` so the run can be explained afterwards. It is JSONL, one
-record per line, written and closed as it happens so it survives a crash; a
-restart renames the previous file rather than overwriting it. A run is framed by
-`run_start` (build, clean or not, strategy, configuration) and `run_end`
-(counts, latency percentiles, seconds per status). In between: `status` and
-`connection` changes, a `decision` record each tick (what the strategy saw,
-including open offers and newly settled trades; whether it acted or waited and
-why; why each incoming offer was passed over; how long the state waited and the
-decision took) and one record per command (its `decision_id`, `request_id`,
-result, the offer or transaction it created, response and confirmation times,
-and whether it missed its tick). Those ids connect every step of an offer.
+`trade` and `walkthrough` runs log evidence automatically now, so the run can
+always be explained afterwards even if nobody remembers a flag: with no
+`--evidence-file`, one is auto-timestamped at
+`logs/live/<UTC timestamp>/<mode>-<station>-evidence.jsonl` (pass
+`--evidence-file` yourself to pick the path, or `--no-evidence` to turn logging
+off entirely). It is JSONL, one record per line, written and closed as it
+happens so it survives a crash; a restart renames the previous file rather than
+overwriting it. A run is framed by `run_start` (build, clean or not, strategy,
+configuration) and `run_end` (counts, latency percentiles, seconds per status).
+In between: `status` and `connection` changes, a `decision` record each tick
+(what the strategy saw, including open offers and newly settled trades;
+whether it acted or waited and why; why each incoming offer was passed over;
+how long the state waited and the decision took) and one record per command
+(its `decision_id`, `request_id`, result, the offer or transaction it created,
+response and confirmation times, and whether it missed its tick). Those ids
+connect every step of an offer. As soon as the run ends (or the client
+crashes), a text summary and an HTML dashboard are written next to the
+evidence log automatically — see "Run summary and dashboard" below.
 
 For a live view during the run, add `--status-file logs/status.html` and open
 it in a browser: it refreshes itself with reserves against targets, pending
@@ -172,28 +182,46 @@ too.
 
 ### Run summary and dashboard from our own evidence log
 
+For a real `trade`/`walkthrough` run, this is now done automatically the
+moment the run ends (or crashes) — a `<mode>-<station>-summary.txt` and
+`<mode>-<station>-dashboard.html` are written next to the evidence log, no
+extra step needed. The command below remains useful to re-generate a
+dashboard on demand, regenerate one for an older or rotated log, or trace a
+specific `--offer`:
+
 `scripts/analyze_evidence.py` turns the `--evidence-file` log from *our own*
 client (decisions, commands sent, and connection events — see "Before a class
 run" above) into a run summary, from the same terminal that ran the client or
 any later one:
 
 ```sh
-python scripts/analyze_evidence.py logs/live-evidence.jsonl --html logs/report.html
+python scripts/analyze_evidence.py logs/live/20260101T000000Z/trade-P01-evidence.jsonl --html logs/report.html
 ```
 
-Printed to the terminal: the build and strategy, decisions logged, commands by
-kind, rejections by code, completed trades, connection uptime/downtime and gaps
-in the decision record, shortages, responsiveness (p50/p95/max per stage and
-missed deadlines), acting versus waiting and why, stalls, time per status, and a
-stock/health timeline.
+Printed to the terminal: the build and strategy, **key findings** (the
+dominant rejection reason, the worst shortage streak, the slowest pipeline
+stage, the biggest single health drop, net trade balance, the widest gap with
+no decisions logged — whichever apply), decisions logged, commands by kind,
+rejections by code, completed trades, connection uptime/downtime and gaps in
+the decision record, shortages, responsiveness (p50/p95/max per stage and
+missed deadlines), acting versus waiting and why, stalls, time per status, and
+a stock/health timeline.
 
 `--html` additionally writes a self-contained, offline dashboard — open
-`logs/report.html` directly in a browser, no server needed:
+`logs/report.html` directly in a browser, no server needed. A **Key findings**
+panel at the top surfaces the same patterns as the text report, each one
+clickable through to its tick; the KPI strip, chart, connection timeline and
+commands/rejections panels below it are trimmed and collapse by default when
+there's nothing notable, so the page stays scannable on a routine run:
 
-- health and stock over time, hoverable, click a point to jump to that tick
-- a connection timeline showing when we were connected vs. not
-- commands-by-kind and rejections-by-code bar charts
-- responsiveness per stage, participation and the status history, completed trades
+- health and stock over time, hoverable, click a point to jump to that tick,
+  click a legend entry to isolate one line
+- a connection timeline showing when we were connected vs. not (collapsed
+  unless there was downtime)
+- commands-by-kind and rejections-by-code bar charts (collapsed unless
+  something was rejected)
+- responsiveness per stage, participation and the status history, completed
+  trades with their net resource balance
 - a searchable, filterable **stimuli &rarr; decision &rarr; outcome** table:
   what the policy saw, what it decided and why (or why it waited), which offers
   it passed over and why, and what the server answered, per tick
@@ -202,7 +230,7 @@ To reconstruct one offer end to end -- what we knew, what we decided and why,
 what we sent, what the server confirmed, whether it became a trade:
 
 ```sh
-python scripts/analyze_evidence.py logs/live-evidence.jsonl --offer offer-37
+python scripts/analyze_evidence.py logs/live/20260101T000000Z/trade-P01-evidence.jsonl --offer offer-37
 ```
 
 Like `analyze_run.py`, it needs only the Python standard library and no
@@ -259,9 +287,8 @@ make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
-639 tests (634 without the practice server); 90% combined statement/branch
-coverage of handwritten code without the integration tests, whose practice
-server also covers the scripted walkthrough. The integration tests start their
+691 tests (686 without the practice server); 97% combined statement/branch
+coverage of handwritten code with the integration tests (`make cov`). The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`. `.github/workflows/ci.yml` runs
 `scripts/check.py --integration` on every push and pull request and keeps the

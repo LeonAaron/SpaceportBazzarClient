@@ -100,6 +100,21 @@ def test_shortages_flag_empty_stock_and_lost_health():
     ]
 
 
+def test_shortage_streaks_groups_consecutive_ticks():
+    rows = [
+        {"tick": 2, "health": 96, "health_lost": 4, "empty": ["food"]},
+        {"tick": 3, "health": 92, "health_lost": 4, "empty": ["food"]},
+        {"tick": 7, "health": 80, "health_lost": 6, "empty": ["water"]},
+    ]
+
+    streaks = analyze_evidence.shortage_streaks(rows)
+
+    assert streaks == [
+        {"start": 2, "end": 3, "length": 2, "health_lost": 8, "empty": ["food"]},
+        {"start": 7, "end": 7, "length": 1, "health_lost": 6, "empty": ["water"]},
+    ]
+
+
 def test_each_decision_carries_the_outcomes_it_caused():
     traces = analyze_evidence.traces(RECORDS)
 
@@ -220,6 +235,39 @@ def test_every_completed_trade_is_listed_once_whoever_accepted():
     assert analyze_evidence.completed_trades(NEW_STYLE + [observed(10, "d5", trades=[TRADE])]) == [TRADE]
 
 
+def test_trade_balance_sums_net_resources_moved():
+    other = {"transaction_id": "txn-5", "offer_id": "offer-1", "counterparty": "P03",
+              "we_paid": bundle(food=3), "we_got": bundle(water=1, components=2), "settled_tick": 6}
+
+    assert analyze_evidence.trade_balance([TRADE, other]) == {"water": -1, "food": -1, "components": 2}
+
+
+def test_key_findings_ranks_by_severity_and_covers_expected_ids():
+    findings = analyze_evidence.key_findings(RECORDS)
+
+    ids = [f["id"] for f in findings]
+    assert set(ids) == {"dominant_rejection", "shortage_streak", "health_drop"}
+    severities = [f["severity"] for f in findings]
+    assert severities == sorted(severities, key=lambda s: {"bad": 0, "warn": 1, "info": 2}[s])
+    by_id = {f["id"]: f for f in findings}
+    assert by_id["shortage_streak"] == {"id": "shortage_streak", "severity": "bad",
+                                         "start": 2, "end": 3, "length": 2, "health_lost": 8,
+                                         "empty": ["food"]}
+
+
+def test_key_findings_is_empty_for_a_clean_run():
+    clean = [decision(0, 100, bundle(5, 5, 5)), decision(1, 100, bundle(5, 5, 5))]
+
+    assert analyze_evidence.key_findings(clean) == []
+
+
+def test_report_includes_key_findings_section():
+    out = analyze_evidence.report(RECORDS)
+
+    assert "key findings:" in out
+    assert "INSUFFICIENT_INVENTORY" in out
+
+
 def test_the_new_sections_appear_in_the_text_and_the_page():
     text = analyze_evidence.report(NEW_STYLE)
     page = analyze_evidence.html_report(NEW_STYLE)
@@ -229,6 +277,7 @@ def test_the_new_sections_appear_in_the_text_and_the_page():
     assert "missed deadlines: 1 of 2" in text
     assert "stalled? 3 tick(s) passed with no decision before tick 9" in text
     assert "Responsiveness" in page and "Completed trades" in page and "txn-4" in page
+    assert "Key findings" in page
 
 
 def test_the_text_report_summarises_the_run():
@@ -254,6 +303,26 @@ def test_embedded_data_cannot_close_the_script_tag():
     page = analyze_evidence.html_report(hostile)
 
     assert "</script><b>" not in page
+
+
+def test_write_reports_returns_empty_for_a_missing_or_empty_log(tmp_path):
+    missing = tmp_path / "missing-evidence.jsonl"
+    empty = tmp_path / "empty-evidence.jsonl"
+    empty.write_text("")
+
+    assert analyze_evidence.write_reports(missing) == {}
+    assert analyze_evidence.write_reports(empty) == {}
+
+
+def test_write_reports_writes_a_summary_and_a_dashboard(tmp_path):
+    path = tmp_path / "P01-evidence.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+
+    written = analyze_evidence.write_reports(path)
+
+    assert written == {"summary": tmp_path / "P01-summary.txt", "dashboard": tmp_path / "P01-dashboard.html"}
+    assert "key findings:" in written["summary"].read_text(encoding="utf-8")
+    assert written["dashboard"].read_text(encoding="utf-8").startswith("<!doctype html>")
 
 
 def test_the_report_runs_end_to_end_from_a_file(tmp_path, capsys):

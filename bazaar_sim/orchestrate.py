@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 import os
 import socket
@@ -24,7 +23,6 @@ from pathlib import Path
 from bazaar_client.strategy import STRATEGIES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ANALYZER = REPO_ROOT / "scripts" / "analyze_evidence.py"
 
 
 def free_port() -> int:
@@ -77,17 +75,14 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 def _dashboards(out: Path, stations: list[str]) -> dict[str, str]:
-    spec = importlib.util.spec_from_file_location("analyze_evidence", ANALYZER)
-    analyzer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(analyzer)
+    from bazaar_client.execution.reporting import load_analyzer
+
+    analyzer = load_analyzer()
     written = {}
     for sid in stations:
-        evidence = out / f"{sid}-evidence.jsonl"
-        if evidence.exists() and evidence.stat().st_size:
-            page = out / f"{sid}-dashboard.html"
-            page.write_text(analyzer.html_report(analyzer.load(evidence), f"{sid} run report"),
-                            encoding="utf-8")
-            written[sid] = str(page)
+        result = analyzer.write_reports(out / f"{sid}-evidence.jsonl", title=f"{sid} run report")
+        if result:
+            written[sid] = str(result["dashboard"])
     return written
 
 
