@@ -181,20 +181,19 @@ def test_an_expired_offer_is_not_accepted():
     assert of_type(decision, AcceptAction) == []
 
 
-def test_several_accepts_in_one_tick_cannot_overspend_the_same_stock():
+def test_several_accepts_stop_before_production_supply_drops_below_ten():
     """Settlement is atomic per offer, so each accept must be affordable in turn."""
     offers = tuple(
         factories.make_offer(
             offer_id=f"o{i}", proposer_id="P02", recipient_id="P01",
-            give=Bundle(food=3), receive=Bundle(water=3), expires_tick=50,
+            give=Bundle(food=6), receive=Bundle(water=3), expires_tick=50,
         )
         for i in range(4)
     )
     decision, _ = decide(
         snapshot(
             rules=factories.make_rules(new_commands_per_station_per_tick=10),
-            # Reserve is 3 water, so 5 are spendable: enough for one 3-for-3 accept.
-            me=station(inventory=Bundle(water=8, food=0, components=30)),
+            me=station(inventory=Bundle(water=15, food=0, components=30)),
             offers=offers,
         ),
         PolicyMemory(),
@@ -303,7 +302,7 @@ def test_a_harmless_offer_is_left_to_expire():
         give=Bundle(water=1), receive=Bundle(food=1), expires_tick=50,
     )
     decision, _ = decide(
-        snapshot(me=station(inventory=Bundle(30, 30, 30)), offers=(harmless,)),
+        snapshot(me=station(inventory=Bundle(40, 30, 30)), offers=(harmless,)),
         PolicyMemory(),
     )
 
@@ -422,3 +421,104 @@ def test_the_decision_reports_the_figures_it_reasoned_from():
     assert decision.urgency[Resource.FOOD] is Urgency.CRITICAL
     assert decision.surplus.water > 0
     assert decision.deficit.food > 0
+
+
+def test_surplus_water_buys_food_earlier_and_more_aggressively():
+    for food, expected_rate in ((30, 1.0), (20, 1.0), (19, 1.2), (15, 1.2), (14, 1.5), (10, 1.5), (9, 2.0), (0, 8.0)):
+        decision, _ = decide(
+            snapshot(
+                me=station(inventory=Bundle(120, food, 30)),
+                advertisements=(peer_selling(Resource.FOOD, frozenset({Resource.WATER})),),
+            ), PolicyMemory(),
+        )
+        offer = next(a for a in of_type(decision, OfferAction) if a.receive.food)
+        assert offer.give.water / offer.receive.food == expected_rate
+        assert offer.give.water <= decision.surplus.water
+        advert = of_type(decision, AdvertiseAction)[0]
+        assert Resource.FOOD in advert.seeking
+        assert Resource.FOOD not in advert.selling
+
+
+def test_healthy_stock_still_trades_production_at_parity():
+    decision, _ = decide(
+        snapshot(me=station(inventory=Bundle(120, 60, 60)),
+                 advertisements=(peer_selling(Resource.FOOD),)), PolicyMemory(),
+    )
+    offers = [a for a in of_type(decision, OfferAction) if a.receive.food]
+    assert offers and offers[0].give.water == offers[0].receive.food
+
+
+def test_desperate_station_accepts_three_water_per_food():
+    offer = factories.make_offer(
+        offer_id="food", proposer_id="P02", recipient_id="P01",
+        give=Bundle(food=4), receive=Bundle(water=12), expires_tick=50,
+    )
+    decision, _ = decide(
+        snapshot(me=station(inventory=Bundle(120, 6, 30)), offers=(offer,)),
+        PolicyMemory(),
+    )
+    assert AcceptAction("food") in decision.actions
+
+
+def test_fair_production_trade_is_accepted_before_advertising_at_thirty():
+    offer = factories.make_offer(
+        offer_id="fair", proposer_id="P02", recipient_id="P01",
+        give=Bundle(food=4), receive=Bundle(water=4), expires_tick=50,
+    )
+    decision, _ = decide(
+        snapshot(me=station(inventory=Bundle(40, 30, 40)), offers=(offer,)),
+        PolicyMemory(),
+    )
+    assert decision.actions[0] == AcceptAction("fair")
+    assert of_type(decision, AdvertiseAction)
+
+
+def test_single_command_budget_prioritizes_acceptance_over_advertising():
+    offer = factories.make_offer(
+        offer_id="fair", proposer_id="P02", recipient_id="P01",
+        give=Bundle(food=4), receive=Bundle(water=4), expires_tick=50,
+    )
+    decision, _ = decide(
+        snapshot(me=station(inventory=Bundle(40, 30, 40)), offers=(offer,)),
+        PolicyMemory(), command_budget=1,
+    )
+    assert decision.actions == [AcceptAction("fair")]
+
+
+def test_production_is_preferred_over_nonrenewable_inventory():
+    decision, _ = decide(
+        snapshot(me=station(specialty=Resource.COMPONENTS, inventory=Bundle(40, 30, 40)),
+                 advertisements=(peer_selling(Resource.FOOD, frozenset({Resource.WATER})),)),
+        PolicyMemory(),
+    )
+    offer = next(a for a in of_type(decision, OfferAction) if a.receive.food)
+    assert offer.give == Bundle(components=offer.receive.food)
+    advert = of_type(decision, AdvertiseAction)[0]
+    assert advert.selling == frozenset({Resource.COMPONENTS})
+    assert advert.seeking == frozenset({Resource.WATER, Resource.FOOD})
+
+
+def test_standing_production_offer_is_withdrawn_below_twenty():
+    offer = factories.make_offer(
+        offer_id="standing", proposer_id="P01", recipient_id="P02",
+        give=Bundle(water=4), receive=Bundle(food=4), expires_tick=50,
+    )
+    decision, _ = decide(
+        snapshot(me=station(inventory=Bundle(15, 40, 40)), offers=(offer,)),
+        PolicyMemory(),
+    )
+    assert WithdrawAction("standing") in decision.actions
+
+
+def test_well_supplied_station_withdraws_its_advertisement():
+    advert = factories.make_advertisement(
+        station_id="P01", selling=frozenset({Resource.WATER}),
+        seeking=frozenset({Resource.FOOD, Resource.COMPONENTS}),
+        created_tick=0, expires_tick=8,
+    )
+    decision, _ = decide(
+        snapshot(tick=6, me=station(inventory=Bundle(60, 60, 60)),
+                 advertisements=(advert,)), PolicyMemory(),
+    )
+    assert not of_type(decision, AdvertiseAction)
+    assert WithdrawAction(advert.advertisement_id) in decision.actions

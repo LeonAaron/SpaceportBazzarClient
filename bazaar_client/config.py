@@ -70,9 +70,8 @@ class ClientConfig:
     mode: str = "trade"
     evidence_file: Path | None = None
     max_decisions: int | None = None
-    strategy: str = "reserve-trader"
-    status_every: int = 10
-    status_file: Path | None = None
+    hivemind_endpoint: str = "ws://127.0.0.1:8765"
+    hivemind_key: Secret | None = None
 
 
 def read_token_from_credentials(path: Path, station_id: str) -> str:
@@ -154,13 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("trade", "check", "handshake", "walkthrough"),
+        choices=("trade", "handshake", "walkthrough", "hivemind"),
         default=os.environ.get("BAZAAR_MODE", "trade"),
         help=(
-            "trade: run the trading policy; check: join, confirm readiness and leave "
-            "without trading (safe on a live server); handshake: connect and "
-            "advertise once (practice server); walkthrough: replay the practice "
-            "server's scripted exercise"
+            "trade: run the trading policy; handshake: connect and advertise once; "
+            "walkthrough: replay the practice server's scripted exercise; "
+            "hivemind: forward state and execute coordinator commands"
         ),
     )
     parser.add_argument(
@@ -186,27 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop after this many decisions (useful for a bounded demo run)",
     )
     parser.add_argument(
-        "--strategy",
-        default=os.environ.get("BAZAAR_STRATEGY", "reserve-trader"),
-        help="decision strategy to run: reserve-trader (default) or passive "
-             "(env: BAZAAR_STRATEGY)",
+        "--hivemind-endpoint",
+        default=os.environ.get("BAZAAR_HIVEMIND_ENDPOINT", "ws://127.0.0.1:8765"),
+        help="Hivemind WebSocket endpoint (env: BAZAAR_HIVEMIND_ENDPOINT)",
     )
     parser.add_argument(
-        "--status-every",
-        type=int,
-        default=int(os.environ.get("BAZAAR_STATUS_EVERY", "10")),
-        help="log a status panel (reserves, offers, trades) every N ticks; 0 disables",
-    )
-    parser.add_argument(
-        "--status-file",
-        type=Path,
-        default=(
-            Path(os.environ["BAZAAR_STATUS_FILE"])
-            if os.environ.get("BAZAAR_STATUS_FILE")
-            else None
-        ),
-        help="rewrite this file with the live status panel each tick "
-             "(.html auto-refreshes in a browser; anything else is plain text)",
+        "--hivemind-key",
+        default=os.environ.get("BAZAAR_HIVEMIND_KEY"),
+        help="Hivemind shared key (env: BAZAAR_HIVEMIND_KEY)",
     )
     return parser
 
@@ -234,7 +219,6 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         mode=args.mode,
         evidence_file=evidence_file,
         max_decisions=args.max_decisions,
-        strategy=args.strategy,
-        status_every=args.status_every,
-        status_file=args.status_file,
+        hivemind_endpoint=args.hivemind_endpoint,
+        hivemind_key=Secret(args.hivemind_key) if args.hivemind_key else None,
     )

@@ -83,201 +83,6 @@ The token is wrapped so it cannot be printed by accident, and a logging filter
 scrubs it from every record as a second line of defence. Credentials and reports
 are gitignored.
 
-`make` is not installed on Windows by default. Every Makefile target is a thin
-wrapper, so run the command behind it directly, for example
-`docker compose exec -T bazaar python -m bazaar_client.cli --mode trade ...`.
-
-### Is it working? Status, and what a failure means
-
-The client reports where it is on this ladder, in the log and in the evidence
-file, so "running", "connected" and "playing" are never confused:
-
-`starting` → `connecting` → `connected` (socket open) → `authenticated` (token
-accepted, first state received) → `synchronized` (readiness confirmed) →
-`waiting` (lobby or pause: idle by design) or `participating` (running and
-deciding every tick) → `finished`. `stale` means the game is running but no new
-state has arrived for three ticks, so our view is out of date; `disconnected`
-means a reconnect is coming. `--mode check` walks the ladder without trading.
-
-Every failure is reported with its category and what to check, and the exit
-code tells scripts which it was:
-
-| Exit | Category | Typical cause | What to check |
-|---|---|---|---|
-| 2 | configuration | no token, bad `--ws-url`, unknown `--strategy` | the flags and env vars above |
-| 3 | authentication | HTTP 401/403, `INVALID_AUTHENTICATION` | the key; a restarted practice server issues new ones |
-| 4 | protocol | HTTP 400, subprotocol not confirmed, bad message, wrong run | `make proto`; the server's version |
-| 5 | network | refused, unresolvable host, timeout, dropped connection | is the server up? (retried automatically) |
-| 1 | application | a bug in the client | rerun with `--log-level DEBUG`; the evidence log |
-
-Only network failures are retried; the others would fail the same way again.
-
-### Joining a live run
-
-From PowerShell in the repo root. The key goes in an environment variable for
-this terminal only, so it never lands in a file, the repo, or the command line
-the container sees:
-
-```powershell
-docker compose up -d --build
-docker compose exec -T bazaar scripts/gen_proto.sh
-$env:BAZAAR_WS_URL = "wss://spaceport.edneo.com/ws"
-$env:BAZAAR_TOKEN  = "<your key>"
-
-# 1. Pre-flight: join, confirm readiness, report our planet, leave. Sends no trades.
-docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode check
-
-# 2. Play: leave this running for the whole run. Evidence logging is automatic
-#    (see "Before a class run"); add --evidence-file to pick the path yourself.
-docker compose exec -T -e BAZAAR_WS_URL -e BAZAAR_TOKEN bazaar python -m bazaar_client.cli --mode trade
-```
-
-`-e NAME` without a value forwards that variable from the terminal into the
-container. The server works out which planet we are from the key, so no station
-ID is needed. Start the client before the run begins: it waits on a quiet
-connection instead of reconnecting, and reconnects by itself if the connection
-really drops. `logs/` is gitignored.
-
-### Before a class run
-
-Deploy from a clean, committed checkout. The client logs its branch and commit
-at startup (`client build main@65468f7bc8a9`), so a run log always says which
-code played. In run 2 the offers on record were ones our committed code cannot
-make, which means an older or modified build was deployed.
-
-`trade` and `walkthrough` runs log evidence automatically now, so the run can
-always be explained afterwards even if nobody remembers a flag: with no
-`--evidence-file`, one is auto-timestamped at
-`logs/live/<UTC timestamp>/<mode>-<station>-evidence.jsonl` (pass
-`--evidence-file` yourself to pick the path, or `--no-evidence` to turn logging
-off entirely). It is JSONL, one record per line, written and closed as it
-happens so it survives a crash; a restart renames the previous file rather than
-overwriting it. A run is framed by `run_start` (build, clean or not, strategy,
-configuration) and `run_end` (counts, latency percentiles, seconds per status).
-In between: `status` and `connection` changes, a `decision` record each tick
-(what the strategy saw, including open offers and newly settled trades;
-whether it acted or waited and why; why each incoming offer was passed over;
-how long the state waited and the decision took) and one record per command
-(its `decision_id`, `request_id`, result, the offer or transaction it created,
-response and confirmation times, and whether it missed its tick). Those ids
-connect every step of an offer. As soon as the run ends (or the client
-crashes), a text summary and an HTML dashboard are written next to the
-evidence log automatically — see "Run summary and dashboard" below.
-
-For a live view during the run, add `--status-file logs/status.html` and open
-it in a browser: it refreshes itself with reserves against targets, pending
-actions, open offers and recent trades. The same panel is logged every
-`--status-every` ticks.
-
-### Analysing a Directorate run log
-
-```sh
-python scripts/analyze_run.py run-2-log.json --station P01
-```
-
-This prints every planet's outcome, how the galaxy's resources were used, and for
-one station its offer terms against their outcomes plus a health and stock
-timeline. It needs only the Python standard library, so other teams can run it
-too.
-
-### Run summary and dashboard from our own evidence log
-
-For a real `trade`/`walkthrough` run, this is now done automatically the
-moment the run ends (or crashes) — a `<mode>-<station>-summary.txt` and
-`<mode>-<station>-dashboard.html` are written next to the evidence log, no
-extra step needed. The command below remains useful to re-generate a
-dashboard on demand, regenerate one for an older or rotated log, or trace a
-specific `--offer`:
-
-`scripts/analyze_evidence.py` turns the `--evidence-file` log from *our own*
-client (decisions, commands sent, and connection events — see "Before a class
-run" above) into a run summary, from the same terminal that ran the client or
-any later one:
-
-```sh
-python scripts/analyze_evidence.py logs/live/20260101T000000Z/trade-P01-evidence.jsonl --html logs/report.html
-```
-
-Printed to the terminal: the build and strategy, **key findings** (the
-dominant rejection reason, the worst shortage streak, the slowest pipeline
-stage, the biggest single health drop, net trade balance, the widest gap with
-no decisions logged — whichever apply), decisions logged, commands by kind,
-rejections by code, completed trades, connection uptime/downtime and gaps in
-the decision record, shortages, responsiveness (p50/p95/max per stage and
-missed deadlines), acting versus waiting and why, stalls, time per status, and
-a stock/health timeline.
-
-`--html` additionally writes a self-contained, offline dashboard — open
-`logs/report.html` directly in a browser, no server needed. A **Key findings**
-panel at the top surfaces the same patterns as the text report, each one
-clickable through to its tick; the KPI strip, chart, connection timeline and
-commands/rejections panels below it are trimmed and collapse by default when
-there's nothing notable, so the page stays scannable on a routine run:
-
-- health and stock over time, hoverable, click a point to jump to that tick,
-  click a legend entry to isolate one line
-- a connection timeline showing when we were connected vs. not (collapsed
-  unless there was downtime)
-- commands-by-kind and rejections-by-code bar charts (collapsed unless
-  something was rejected)
-- responsiveness per stage, participation and the status history, completed
-  trades with their net resource balance
-- a searchable, filterable **stimuli &rarr; decision &rarr; outcome** table:
-  what the policy saw, what it decided and why (or why it waited), which offers
-  it passed over and why, and what the server answered, per tick
-
-To reconstruct one offer end to end -- what we knew, what we decided and why,
-what we sent, what the server confirmed, whether it became a trade:
-
-```sh
-python scripts/analyze_evidence.py logs/live/20260101T000000Z/trade-P01-evidence.jsonl --offer offer-37
-```
-
-Like `analyze_run.py`, it needs only the Python standard library and no
-network access, so it also works outside the container and offline.
-
-### Checking one decision without a server
-
-```sh
-python scripts/decide_once.py scenarios/unfair-offer.json
-python scripts/decide_once.py scenarios/incoming-gift.json --strategy passive
-```
-
-A scenario file is a planet state plus the market, and an `expect` block; the
-command prints the decision, its reasons and every pass, and exits non-zero if
-the decision is not what the file expects. Every file in `scenarios/` is also a test.
-
-## Our own server and local simulations
-
-The practice server plays one fixed script. To play real, multi-tick games we
-run our own server, which speaks the same protocol (details in
-[SIMULATOR.md](SIMULATOR.md)):
-
-```sh
-# a server plus N separate client processes; logs, evidence and dashboards per planet
-python -m bazaar_sim.orchestrate --planets 5 --ticks 60 --tick-ms 300
-python -m bazaar_sim.orchestrate --planets 3 --strategies reserve-trader:2,passive:1
-
-# just the server; point any client at it (ours, or another pair's)
-python -m bazaar_sim.server --planets 3 --port 3100 --credentials-file sim-credentials.json
-python -m bazaar_client.cli --ws-url ws://127.0.0.1:3100/ws --credentials-file sim-credentials.json --station-id P02
-python -m bazaar_sim.server --planets 9 --open-auth    # ignore keys, seat planets in connection order
-```
-
-Production is balanced by default: for every resource the world makes exactly
-what it consumes. The server writes a scored report when the run ends.
-
-## Comparing strategies
-
-```sh
-python -m bazaar_sim.benchmark                                 # matched scenarios x seeds x seats
-python -m bazaar_sim.benchmark --check logs/benchmark.json      # reproduce every row exactly
-```
-
-Success is defined before comparing (collective survival first; see
-[BENCHMARKS.md](BENCHMARKS.md)), every candidate plays identical cases, and
-failed runs are listed, not hidden.
-
 ## Tests
 
 ```sh
@@ -287,8 +92,7 @@ make test-integration  # against a real practice server it starts itself
 make cov               # full suite, including integration, with branch coverage
 ```
 
-691 tests (686 without the practice server); 97% combined statement/branch
-coverage of handwritten code with the integration tests (`make cov`). The integration tests start their
+420 tests; 94% combined statement/branch coverage of handwritten code. The integration tests start their
 own `bazaar-server` on a free port, so they are repeatable and do not disturb
 the instance from `docker compose up`. `.github/workflows/ci.yml` runs
 `scripts/check.py --integration` on every push and pull request and keeps the
@@ -299,11 +103,7 @@ format, handshake and command set exactly, and it cannot exercise the trading
 policy — any unscripted command ends the exercise as `scenario mismatch`, by
 design. The policy is covered by unit tests and simulated multi-tick
 economies, including nine planets with variable production, delayed acceptance,
-temporary outages, a replay of the Directorate's run 2, and full runs against
-stand-ins for the clients seen in that run, measuring how long the world and our
-planet survive (`tests/survival/test_world_survival.py`). The trading rules
-(one-for-one, paid only in our specialty) are checked on every action across a
-grid of situations. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
+and temporary outages. See [ARCHITECTURE.md](ARCHITECTURE.md#testing).
 
 ## Layout
 
@@ -322,22 +122,6 @@ bazaar_client/
   metrics.py            latency percentiles and missed deadlines
   diagnostics.py        failure categories, hints and exit codes
   scripted_walkthrough.py  the practice exercise replay
-  version.py            which build is running, clean or not
-bazaar_sim/
-  economy.py            the rule engine: production, upkeep, health, settlement
-  server.py             our Bazaar server over the real protocol
-  codec.py              the server's protobuf boundary
-  orchestrate.py        server + N client processes, one command
-  opponents.py          stand-ins for the clients seen in run 2
-  world.py              whole-world runs, balanced production, the success score
-  benchmark.py          matched comparisons, reproducibility check
-scenarios/              example situations with the decision each expects
-scripts/
-  gen_proto.sh          protobuf codegen
-  check.py              every check in one command
-  analyze_run.py        summarise a Directorate run log
-  analyze_evidence.py   summarise our own evidence log; HTML dashboard; one offer's story
-  decide_once.py        one decision from a scenario file, no server
 ```
 
 After dependency or Dockerfile changes, rebuild the running service with
@@ -348,3 +132,114 @@ fresh container without restarting an existing practice exercise:
 docker compose build
 docker compose run --rm --no-deps bazaar sh -c 'scripts/gen_proto.sh && pytest --cov=bazaar_client --cov-branch'
 ```
+
+Trading continuously offers surplus production for the two imported resources,
+even while stocks are healthy. Import prices use uncommitted stock:
+
+| Import stock | Offered payment per unit received |
+| --- | --- |
+| 20+ | 1 |
+| 15–19 | 1.2 |
+| 10–14 | 1.5 |
+| 9 / 8 / 7 | 2 / 2.25 / 2.5 |
+| Below 7 | 2.5 × 1.25^(7 − stock), capped at 8 |
+
+Trades normally request four units; the 1.2 tier requests five so six units of
+payment express the price exactly. Other prices round to whole units. Incoming
+production-for-import offers use the same curve and are evaluated before
+advertising. Advertisements continuously list production for sale and imports
+as wanted, renewing before expiry.
+
+Production protection uses the balance **after payment is reserved**, including
+all standing offers. Normal offers retain 25 ticks of specialty upkeep; trades
+at 0.5:1 or better retain 10 ticks. Below 10 ticks no paid trades are permitted.
+New offers and acceptances cannot invalidate standing normal offers by dropping
+the balance below 25 ticks. Outgoing gifts also retain 25 ticks; free incoming
+gifts remain welcome. These buffers allow normal trades from the 30-unit start.
+
+When **every** resource is above 30 uncommitted units, stop advertising and
+withdraw any active advertisement. Continue seeking trades, but accept only
+offers with a strict net gain in total units and no received units of our own
+produced resource (including mixed bundles). At 30 or below in any resource,
+normal advertising and acceptance resume.
+
+Excess above 32 uncommitted units of any resource builds a protected storage
+balance within inventory. The upkeep reserve plus this stored balance is capped
+at 15 units per resource. Already stored units are excluded when calculating
+new excess, so repeated snapshots do not count the same stock twice. Storage
+persists when inventory falls and can be consumed by upkeep, but not trades.
+There is no separate server-side storage or deposit command.
+
+## Hivemind mode
+
+The [upstream Hivemind README](spaceport_hivemind/README.md) describes a central
+coordinator: bridges forward Bazaar state and execute its explicit commands.
+This checkout pins that repository as a Git submodule. Initialize it on a fresh
+checkout, then install its optional package into the same environment as this
+client:
+
+```sh
+git submodule update --init --recursive
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt -e ./spaceport_hivemind
+```
+
+In separate terminals, start the demo game and coordinator:
+
+```sh
+.venv/bin/hivemind-demo-server --credential-file /tmp/hive-demo-credentials.json \
+  --stations P01,P02,P03 --duration-ticks 30 --tick-duration-ms 1000
+
+.venv/bin/hivemind-server --host 127.0.0.1 --port 8765 \
+  --shared-key local-hive-key --station-count 3
+```
+
+Start one assignment client for each station, changing `P01` to `P02` and `P03`:
+
+```sh
+BAZAAR_HIVEMIND_KEY=local-hive-key .venv/bin/python -m bazaar_client.cli \
+  --mode hivemind --station-id P01 \
+  --credentials-file /tmp/hive-demo-credentials.json \
+  --ws-url ws://127.0.0.1:3001/ws \
+  --hivemind-endpoint ws://127.0.0.1:8765
+```
+
+`--hivemind-endpoint` also accepts `BAZAAR_HIVEMIND_ENDPOINT`;
+`--hivemind-key` overrides `BAZAAR_HIVEMIND_KEY`. Existing game-token flags,
+environment variables, and credentials files work in this mode. The game token
+stays at the bridge; the coordinator receives its separate shared key. Both
+secrets are redacted by this client's logging setup.
+
+Hivemind mode delegates to upstream `HivemindClient`, using its binary Bazaar
+connection and JSON coordinator protocol. The local trading policy, autonomous
+reconnect supervisor, evidence log, and `--max-decisions` do not run in this
+mode. A connection failure exits through the CLI error handler. The default
+`--mode trade` still runs the assignment policy. Run only one client per station.
+For Docker, install the optional package inside the running container with
+`docker compose exec bazaar pip install -e /workspace/spaceport_hivemind` and use
+endpoints reachable from that container.
+
+All configured bridges must connect before the demo game starts. The assignment
+practice server accepts only P01 and follows a fixed script, so use the hivemind
+demo server for coordinated trading. Verify this client's adapter with:
+
+```sh
+.venv/bin/python -m pytest tests/unit/test_hivemind.py tests/integration/test_hivemind_demo.py -q
+```
+
+### Rebase validation
+
+The assignment policy was preserved when rebasing onto the incoming optimization
+branch. Incoming decision logging, build identification, run analysis, and
+counterparty observations remain; decision logs now report the assignment's
+reserve and surplus. The grid tests enforce the assignment price cap instead
+of the replaced strategy's fixed 1:1 pricing.
+
+The suite is not fully green: seven five-unit-start simulation failures also
+reproduce on the original assignment commit (`26b9909`), whose production guards
+prevent recovery in those scenarios. Five incoming world-simulation assertions
+also fail with the preserved policy: four expect stronger survival against
+quitting suppliers and one requires every trade to be 1:1. These assertions remain
+visible. The earlier coverage and test-count figures above are historical, not
+validation of this combined version. The original commit is saved locally as
+`backup/assignment-before-hivemind`.

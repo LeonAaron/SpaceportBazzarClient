@@ -199,9 +199,9 @@ async def test_loop_replans_after_one_action_and_honours_new_pause():
 
 def test_acceptances_and_new_offers_share_one_spending_balance():
     incoming = f.make_offer(
-        proposer_id="P02", recipient_id="P01", give=Bundle(food=10), receive=Bundle(water=7)
+        proposer_id="P02", recipient_id="P01", give=Bundle(food=14), receive=Bundle(water=7)
     )
-    state = f.make_snapshot(me=f.make_station(inventory=Bundle(10, 0, 0)), offers=(incoming,),
+    state = f.make_snapshot(me=f.make_station(inventory=Bundle(25, 0, 0)), offers=(incoming,),
                             advertisements=(advertisement(),))
     decision, _ = decide(state, PolicyMemory())
     assert AcceptAction(incoming.offer_id) in decision.actions
@@ -220,7 +220,7 @@ def test_gifts_use_only_surplus_left_after_new_offers_and_obey_offer_limit():
     ads = (advertisement(), advertisement("P03", Resource.COMPONENTS))
     for tick in range(5):
         memory.observe(f.make_snapshot(tick=tick, advertisements=ads))
-    state = f.make_snapshot(tick=5, me=f.make_station(inventory=Bundle(5, 3, 3)),
+    state = f.make_snapshot(tick=5, me=f.make_station(inventory=Bundle(25, 3, 3)),
                             advertisements=ads, rules=f.make_rules(max_open_outgoing_offers=1))
     decision, _ = decide(state, memory)
     offers = [a for a in decision.actions if isinstance(a, OfferAction)]

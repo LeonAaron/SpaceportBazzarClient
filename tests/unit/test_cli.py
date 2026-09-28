@@ -69,7 +69,7 @@ def make_config(**overrides) -> ClientConfig:
 
 
 def install_session(monkeypatch, session):
-    monkeypatch.setattr("bazaar_client.cli.BazaarSession", lambda config: session)
+    monkeypatch.setattr("bazaar_client.app.BazaarSession", lambda config: session)
     return session
 
 
@@ -210,7 +210,7 @@ def test_main_returns_one_when_the_session_fails(monkeypatch):
     def explode(config):
         raise RuntimeError("server rejected WebSocket connection: HTTP 401")
 
-    monkeypatch.setattr("bazaar_client.cli.BazaarSession", explode)
+    monkeypatch.setattr("bazaar_client.app.BazaarSession", explode)
 
     assert main(["--token", TOKEN, "--mode", "handshake"]) == 1
 

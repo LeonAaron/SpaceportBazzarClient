@@ -290,13 +290,12 @@ class TradingLoop:
         passes = self._strategy.explain_passes(snapshot, decision)
         decision_id = self._evidence.decision(snapshot, decision, context=context, passes=passes)
         logger.info(
-            "tick %d health %d inventory %s | import targets %s | spare %s %d",
+            "tick %d health %d inventory %s | reserve %s | surplus %s",
             snapshot.tick,
             snapshot.me.health,
             snapshot.me.inventory.as_dict(),
-            decision.targets.as_dict(),
-            snapshot.me.specialty.name,
-            decision.spendable,
+            decision.reserve.as_dict(),
+            decision.surplus.as_dict(),
         )
         for reason in decision.reasons:
             logger.info("  -> %s", reason)
