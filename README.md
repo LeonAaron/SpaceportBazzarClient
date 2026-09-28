@@ -116,6 +116,33 @@ one station its offer terms against their outcomes plus a health and stock
 timeline. It needs only the Python standard library, so other teams can run it
 too.
 
+### Run summary and dashboard from our own evidence log
+
+`scripts/analyze_evidence.py` turns the `--evidence-file` log from *our own*
+client (decisions, commands sent, and connection events — see "Before a class
+run" above) into a run summary, from the same terminal that ran the client or
+any later one:
+
+```sh
+python scripts/analyze_evidence.py logs/live-evidence.jsonl --html logs/report.html
+```
+
+Printed to the terminal: decisions logged, commands by kind, rejections by
+code, trades settled, connection uptime/downtime, and a stock/health timeline.
+
+`--html` additionally writes a self-contained, offline dashboard — open
+`logs/report.html` directly in a browser, no server needed:
+
+- health and stock over time, hoverable, click a point to jump to that tick
+- a connection timeline showing when we were connected vs. not
+- commands-by-kind and rejections-by-code bar charts
+- a searchable, filterable **stimuli &rarr; decision &rarr; outcome** table:
+  what the policy saw, what it decided and why, and what the server answered,
+  per tick
+
+Like `analyze_run.py`, it needs only the Python standard library and no
+network access, so it also works outside the container and offline.
+
 ## Tests
 
 ```sh

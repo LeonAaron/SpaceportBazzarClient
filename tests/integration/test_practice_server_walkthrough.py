@@ -141,11 +141,13 @@ async def test_evidence_log_links_decisions_to_results_and_states(practice_serve
     result = await run_walkthrough(config_for(practice_server, tmp_path), evidence_path)
     assert result.ok
 
-    records = [json.loads(line) for line in evidence_path.read_text().splitlines() if line.strip()]
+    lines = [json.loads(line) for line in evidence_path.read_text().splitlines() if line.strip()]
+    records = [r for r in lines if r.get("kind") != "connection"]
     by_step = {r["step"]: r for r in records}
 
-    # One record per command plus the sync.
+    # One record per command plus the sync, between the connection's open and close.
     assert len(records) == 7
+    assert [r["event"] for r in lines if r.get("kind") == "connection"] == ["connected", "closed"]
 
     advertise = by_step["2"]
     assert advertise["action_kind"] == "advertise"

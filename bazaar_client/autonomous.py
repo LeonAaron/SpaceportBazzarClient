@@ -50,6 +50,8 @@ class TradingStats:
     withdrawals: int = 0
     rejections_by_code: dict[str, int] = field(default_factory=dict)
     final_snapshot: Snapshot | None = None
+    # Lives here, not on TradingLoop, so reconnects don't re-log the same tick.
+    last_logged_tick: int | None = None
 
     def record_rejection(self, code: str) -> None:
         self.rejections_by_code[code] = self.rejections_by_code.get(code, 0) + 1
@@ -75,7 +77,6 @@ class TradingLoop:
             session, self._evidence, self._commitments, self._memory.counterparties
         )
         self.stats = stats or TradingStats()
-        self._last_logged_tick: int | None = None
 
     @property
     def memory(self) -> PolicyMemory:
@@ -179,9 +180,9 @@ class TradingLoop:
     def _log_decision(self, snapshot: Snapshot, decision: Decision) -> None:
         # Several snapshots arrive per tick; record each tick once, plus every
         # decision that actually acted, so the log stays readable.
-        if not decision.actions and snapshot.tick == self._last_logged_tick:
+        if not decision.actions and snapshot.tick == self.stats.last_logged_tick:
             return
-        self._last_logged_tick = snapshot.tick
+        self.stats.last_logged_tick = snapshot.tick
         self._evidence.decision(snapshot, decision)
         logger.info(
             "tick %d health %d inventory %s | import targets %s | spare %s %d",
@@ -248,8 +249,10 @@ async def run_trading(
     while max_attempts is None or attempt < max_attempts:
         attempt += 1
         decisions_before = stats.decisions
+        evidence.connection_event("connecting", detail=f"attempt {attempt}")
         try:
             async with BazaarSession(config, throttle=throttle) as session:
+                evidence.connection_event("connected")
                 loop = TradingLoop(
                     session, memory=memory, stats=stats, evidence=evidence
                 )
@@ -262,23 +265,31 @@ async def run_trading(
 
                 if session.abort_reason is not None:
                     logger.error("not reconnecting: %s", session.abort_reason)
+                    evidence.connection_event("closed", detail=f"aborted: {session.abort_reason}")
                     return stats
                 if stats.final_snapshot is not None and (
                     stats.final_snapshot.phase in TERMINAL_PHASES
                 ):
+                    evidence.connection_event(
+                        "closed", detail=f"run {stats.final_snapshot.phase.name}"
+                    )
                     return stats
                 if max_decisions is not None and stats.decisions >= max_decisions:
+                    evidence.connection_event("closed", detail="decision cap reached")
                     return stats
         except SessionAbortedError as exc:
             logger.error("not reconnecting: %s", exc)
+            evidence.connection_event("closed", detail=f"aborted: {exc}")
             return stats
         except (OSError, SessionClosedError, asyncio.TimeoutError) as exc:
             logger.warning("connection problem: %s", exc)
+            evidence.connection_event("disconnected", detail=str(exc) or type(exc).__name__)
         except SubprotocolNotSelected:
             raise  # a misconfigured client, not a transient fault
 
         delay = backoff_delay(attempt, config.reconnect_max_backoff_s)
         logger.info("reconnecting in %.1fs (attempt %d)", delay, attempt)
+        evidence.connection_event("reconnecting", detail=f"delay={delay:.1f}s")
         await sleep(delay)
 
     return stats

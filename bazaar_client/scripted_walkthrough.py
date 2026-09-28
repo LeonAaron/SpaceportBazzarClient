@@ -387,4 +387,11 @@ async def run_walkthrough(
     config: ClientConfig, evidence_path: Path | None = None
 ) -> WalkthroughResult:
     async with BazaarSession(config) as session:
-        return await ScriptedWalkthrough(session, evidence_path).run()
+        walkthrough = ScriptedWalkthrough(session, evidence_path)
+        walkthrough.evidence.connection_event("connected")
+        result = await walkthrough.run()
+        walkthrough.evidence.connection_event(
+            "closed", detail=f"walkthrough: {len(result.checks) - len(result.failures)}"
+                             f" of {len(result.checks)} checks passed"
+        )
+        return result

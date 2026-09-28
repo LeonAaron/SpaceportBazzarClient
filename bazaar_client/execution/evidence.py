@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +19,16 @@ from bazaar_client.domain.types import Snapshot
 logger = logging.getLogger(__name__)
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @dataclass
 class EvidenceRecord:
     step: str
     action_kind: str
     action: dict
+    timestamp: str = field(default_factory=_now)
     request_id: str | None = None
     observed_tick: int | None = None
     observed_world_version: int | None = None
@@ -63,6 +69,7 @@ class EvidenceLog:
         """What the policy saw and chose, so a later failure can be explained."""
         entry = {
             "kind": "decision",
+            "timestamp": _now(),
             "tick": snapshot.tick,
             "snapshot_sequence": snapshot.snapshot_sequence,
             "health": snapshot.me.health,
@@ -75,6 +82,13 @@ class EvidenceLog:
             "reasons": list(decision.reasons),
         }
         self._decisions.append(entry)
+        self._write_line(json.dumps(entry))
+
+    def connection_event(self, event: str, *, detail: str | None = None) -> None:
+        """connecting / connected / disconnected / reconnecting, so downtime is visible."""
+        entry = {"kind": "connection", "timestamp": _now(), "event": event}
+        if detail is not None:
+            entry["detail"] = detail
         self._write_line(json.dumps(entry))
 
     def start(self, step: str, action, observed: Snapshot | None) -> EvidenceRecord:

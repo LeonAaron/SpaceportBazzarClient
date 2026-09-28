@@ -215,6 +215,47 @@ async def test_reconnect_attempts_are_bounded(monkeypatch):
     assert len(ScriptedSession.attempts) == 3
 
 
+async def test_connection_changes_are_recorded_in_the_evidence_log(monkeypatch, tmp_path):
+    """Disconnected periods must be recoverable from the structured log alone."""
+    import json
+
+    def behaviour(loop):
+        loop.stats.decisions += 1
+        loop.stats.final_snapshot = factories.make_snapshot(phase=Phase.FINISHED)
+
+    install(monkeypatch, ["refuse", "ok"], behaviour)
+    path = tmp_path / "evidence.jsonl"
+
+    await run_trading(make_config(), path, max_attempts=3, sleep=lambda d: _record([], d))
+
+    events = [
+        json.loads(line)["event"]
+        for line in path.read_text().splitlines()
+        if '"connection"' in line
+    ]
+    assert events == [
+        "connecting", "disconnected", "reconnecting", "connecting", "connected", "closed",
+    ]
+
+
+def test_an_idle_tick_is_logged_once_even_across_a_reconnect():
+    """Run 2's log repeated tick 0 once per reconnect: each new loop forgot it."""
+    from bazaar_client.autonomous import TradingLoop, TradingStats
+    from bazaar_client.execution.evidence import EvidenceLog
+    from bazaar_client.policy.decide import decide
+    from bazaar_client.policy.memory import PolicyMemory
+
+    stats, evidence = TradingStats(), EvidenceLog()
+    snapshot = factories.make_snapshot(phase=Phase.READY)
+    decision, _ = decide(snapshot, PolicyMemory())
+    assert not decision.actions
+
+    for _ in range(3):  # one loop per connection, as run_trading builds them
+        TradingLoop(object(), stats=stats, evidence=evidence)._log_decision(snapshot, decision)
+
+    assert len(evidence.decisions) == 1
+
+
 # --- joining a run that has not started yet ----------------------------------
 
 

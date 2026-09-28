@@ -56,6 +56,35 @@ def test_decision_records_are_kept_in_memory_without_a_file():
     assert log.decisions[0]["kind"] == "decision"
 
 
+def test_every_record_carries_a_wall_clock_timestamp(tmp_path):
+    """Ticks stop while we are disconnected; only real time shows how long for."""
+    from datetime import datetime
+
+    from bazaar_client.execution.actions import AcceptAction
+
+    log = EvidenceLog(tmp_path / "evidence.jsonl")
+    snapshot, decision = decided_snapshot()
+
+    log.decision(snapshot, decision)
+    log.complete(log.start("tick-0", AcceptAction(offer_id="offer-1"), snapshot))
+    log.connection_event("connected")
+
+    for record in log.read_back():
+        assert datetime.fromisoformat(record["timestamp"]).tzinfo is not None
+
+
+def test_connection_events_are_structured_records(tmp_path):
+    log = EvidenceLog(tmp_path / "evidence.jsonl")
+
+    log.connection_event("disconnected", detail="connection reset")
+    log.connection_event("connected")
+
+    first, second = log.read_back()
+    assert first["kind"] == "connection"
+    assert (first["event"], first["detail"]) == ("disconnected", "connection reset")
+    assert second["event"] == "connected" and "detail" not in second
+
+
 def fake_git(tmp_path, head, refs=None, packed=None):
     git = tmp_path / ".git"
     git.mkdir()
