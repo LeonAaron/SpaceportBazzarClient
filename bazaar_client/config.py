@@ -70,6 +70,9 @@ class ClientConfig:
     mode: str = "trade"
     evidence_file: Path | None = None
     max_decisions: int | None = None
+    strategy: str = "reserve-trader"
+    status_every: int = 10
+    status_file: Path | None = None
     hivemind_endpoint: str = "ws://127.0.0.1:8765"
     hivemind_key: Secret | None = None
 
@@ -153,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("trade", "handshake", "walkthrough", "hivemind"),
+        choices=("trade", "check", "handshake", "walkthrough", "hivemind"),
         default=os.environ.get("BAZAAR_MODE", "trade"),
         help=(
             "trade: run the trading policy; handshake: connect and advertise once; "
@@ -193,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BAZAAR_HIVEMIND_KEY"),
         help="Hivemind shared key (env: BAZAAR_HIVEMIND_KEY)",
     )
+    parser.add_argument("--strategy", default=os.environ.get("BAZAAR_STRATEGY", "reserve-trader"))
+    parser.add_argument("--status-every", type=int, default=os.environ.get("BAZAAR_STATUS_EVERY", "10"))
+    parser.add_argument("--status-file", type=Path, default=os.environ.get("BAZAAR_STATUS_FILE"))
     return parser
 
 
@@ -217,6 +223,9 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         run_id_file=args.run_id_file,
         log_level=args.log_level,
         mode=args.mode,
+        strategy=args.strategy,
+        status_every=args.status_every,
+        status_file=args.status_file,
         evidence_file=evidence_file,
         max_decisions=args.max_decisions,
         hivemind_endpoint=args.hivemind_endpoint,

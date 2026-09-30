@@ -2,7 +2,7 @@
 
 `scripts/` has no `__init__.py`, so anything that wants its `report()`/
 `html_report()`/`write_reports()` loads the file directly instead of importing
-it. This is the one shared loader, used both by the simulator's dashboards
+it. This is the one shared loader, used both by the simulator's summaries
 (`bazaar_sim/orchestrate.py`) and by the real-run CLI after a trade/walkthrough
 finishes.
 """

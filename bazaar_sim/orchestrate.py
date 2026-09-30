@@ -6,7 +6,7 @@
 Each client is a separate `python -m bazaar_client.cli --mode trade` process
 talking to the server over a real socket, exactly as in a class run. Output
 goes to one folder: the server's scored report and log, and per planet its
-client log, JSONL evidence and HTML dashboard.
+client log, JSONL evidence and Markdown summary. --live opens a browser view.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import json
 import os
 import socket
 import sys
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,7 +76,7 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
             await process.wait()
 
 
-def _dashboards(out: Path, stations: list[str]) -> dict[str, str]:
+def _summaries(out: Path, stations: list[str]) -> dict[str, str]:
     from bazaar_client.execution.reporting import load_analyzer
 
     analyzer = load_analyzer()
@@ -82,7 +84,7 @@ def _dashboards(out: Path, stations: list[str]) -> dict[str, str]:
     for sid in stations:
         result = analyzer.write_reports(out / f"{sid}-evidence.jsonl", title=f"{sid} run report")
         if result:
-            written[sid] = str(result["dashboard"])
+            written[sid] = str(result["summary"])
     return written
 
 
@@ -91,6 +93,8 @@ async def orchestrate(args: argparse.Namespace) -> dict:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = args.out or REPO_ROOT / "logs" / "sim" / stamp
     out.mkdir(parents=True, exist_ok=True)
+    if (out / "credentials.json").exists():
+        raise ValueError(f"{out} already contains a run; choose a new --out directory")
     port = args.port or free_port()
     url = f"ws://127.0.0.1:{port}/ws"
     credentials = out / "credentials.json"
@@ -145,7 +149,7 @@ async def orchestrate(args: argparse.Namespace) -> dict:
         "strategies": dict(zip((f"P{i + 1:02}" for i in range(args.planets)), strategies)),
         "client_exit_codes": exit_codes,
         "server_report": report,
-        "dashboards": _dashboards(out, list(clients)) if args.dashboards else {},
+        "summaries": _summaries(out, list(clients)),
     }
     (out / "orchestration.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
@@ -168,8 +172,8 @@ def print_summary(summary: dict) -> None:
         imp = "/".join(str(v) for v in planet["imported"].values())
         print(f"{sid:7} {summary['strategies'][sid]:15} {str(summary['client_exit_codes'].get(sid)):12} "
               f"{planet['health']:>6} {str(planet['first_failure_tick'] or '-'):>9} {inv:>16} {imp:>12}")
-    for sid, page in summary["dashboards"].items():
-        print(f"dashboard {sid}: {page}")
+    for sid, page in summary["summaries"].items():
+        print(f"summary {sid}: {page}")
     print(f"everything is in {summary['out']}")
 
 
@@ -188,18 +192,54 @@ def build_parser() -> argparse.ArgumentParser:
                         help="seconds allowed beyond the run's length before giving up")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--client-log-level", default="INFO")
-    parser.add_argument("--no-dashboards", dest="dashboards", action="store_false")
+    parser.add_argument("--no-dashboards", dest="dashboards", action="store_false", help=argparse.SUPPRESS)
+    parser.add_argument("--live", action="store_true", help="open a live browser dashboard; keep it available until Ctrl+C")
+    parser.add_argument("--dashboard-port", type=int, default=8766)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    dashboard = None
+    if args.live:
+        args.out = args.out or REPO_ROOT / "logs" / "sim" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        if (args.out / "credentials.json").exists():
+            print("Choose a new --out directory for this simulation.", file=sys.stderr)
+            return 2
+        args.out.mkdir(parents=True, exist_ok=True)
+        ready = args.out / "dashboard-url.txt"
+        ready.unlink(missing_ok=True)
+        dashboard = subprocess.Popen([
+            sys.executable, "-m", "bazaar_client.live_dashboard", str(args.out),
+            "--port", str(args.dashboard_port), "--open", "--ready-file", str(ready),
+        ], cwd=REPO_ROOT)
     try:
+        if dashboard:
+            deadline = time.monotonic() + 10
+            while not ready.exists():
+                if dashboard.poll() is not None:
+                    raise ValueError("dashboard could not start; try a different --dashboard-port")
+                if time.monotonic() > deadline:
+                    raise ValueError("dashboard startup timed out")
+                time.sleep(.02)
         summary = asyncio.run(orchestrate(args))
+        print_summary(summary)
+        if dashboard:
+            print("Simulation complete. The live page remains available; press Ctrl+C to close it.", flush=True)
+            dashboard.wait()
+    except KeyboardInterrupt:
+        return 130
     except ValueError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return 2
-    print_summary(summary)
+    finally:
+        if dashboard and dashboard.poll() is None:
+            dashboard.terminate()
+            try:
+                dashboard.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                dashboard.kill()
+                dashboard.wait()
     report = summary["server_report"]
     clean = report is not None and report["phase"] == "FINISHED" and all(
         code == 0 for code in summary["client_exit_codes"].values())

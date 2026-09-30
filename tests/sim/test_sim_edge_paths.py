@@ -341,4 +341,4 @@ def test_an_impossible_strategy_mix_is_a_configuration_error(capsys):
 def test_dashboards_are_only_built_for_planets_that_logged_something(tmp_path):
     (tmp_path / "P01-evidence.jsonl").write_text("")
 
-    assert orchestrate._dashboards(tmp_path, ["P01", "P02"]) == {}
+    assert orchestrate._summaries(tmp_path, ["P01", "P02"]) == {}

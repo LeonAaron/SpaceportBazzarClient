@@ -50,7 +50,7 @@ def test_the_panel_shows_reserves_pending_offers_and_recent_trades():
 
     first, reserves, pending, *rest = panel.splitlines()
     assert "tick 42/120" in first and "participating" in first and "health 100/100" in first
-    assert reserves.startswith("reserves") and "food 30/" in reserves and "target" in reserves
+    assert reserves.startswith("reserves") and "food 30 (reserve" in reserves and "uncommitted" in reserves
     assert pending.startswith("pending") and "accept offer_id=offer-19" in pending
     assert "1 command(s) awaiting confirmation" in pending
     body = "\n".join(rest)

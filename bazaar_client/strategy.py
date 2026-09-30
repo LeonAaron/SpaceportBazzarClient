@@ -16,6 +16,7 @@ from bazaar_client.execution.actions import AcceptAction
 from bazaar_client.policy.accept import evaluate_incoming
 from bazaar_client.policy.decide import Decision, decide
 from bazaar_client.policy.memory import PolicyMemory
+from bazaar_client.policy.reserves import production_payment_limit
 from bazaar_client.world.commitments import CommitmentTracker
 
 DEFAULT_STRATEGY = "reserve-trader"
@@ -65,7 +66,7 @@ class ReserveTrader:
     """The trading policy in `bazaar_client.policy` (see ARCHITECTURE.md)."""
 
     name: str = DEFAULT_STRATEGY
-    description: str = "hold import reserves, trade specialty 1:1, gift idle surplus (default)"
+    description: str = "stock-based pricing with protected reserves and production guards (default)"
 
     def decide(self, observation, memory, commitments=None, *, command_budget=None):
         return decide(observation, memory, commitments, command_budget=command_budget)
@@ -73,7 +74,7 @@ class ReserveTrader:
     def explain_passes(self, observation, decision):
         """Re-asks the policy's own accept rule, read-only, for offers it left alone.
 
-        Uses the specialty spendable at the start of the decision; an offer the
+        Uses the uncommitted stock at the start of the decision; an offer the
         rule would take was left for a later tick because the command budget
         went to higher-priority actions first.
         """
@@ -83,8 +84,21 @@ class ReserveTrader:
             return {o.offer_id: gate for o in offers}
         reasons = {}
         for offer in offers:
+            cost = offer.what_station_pays(observation.self_station_id)
+            limit = production_payment_limit(
+                decision.available.saturating_sub(cost), observation.me
+            )
+            preserve_normal = any(
+                o.receive.is_zero() or o.give.total() > 0.5 * o.receive.total()
+                for o in observation.outgoing_open_offers()
+            )
+            if not cost.is_zero() and preserve_normal and limit is not None:
+                reasons[offer.offer_id] = "production supply guard protects standing offers"
+                continue
             verdict = evaluate_incoming(
-                offer, observation.self_station_id, observation.me.specialty, decision.spendable
+                offer, observation.self_station_id, decision.available,
+                decision.reserve, decision.urgency,
+                specialty=observation.me.specialty, max_payment_ratio=limit,
             )
             reasons[offer.offer_id] = (
                 "worth accepting, but this tick's command budget went elsewhere or ran out"

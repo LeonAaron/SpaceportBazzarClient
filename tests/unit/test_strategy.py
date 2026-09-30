@@ -83,10 +83,10 @@ def test_passes_are_explained_with_the_policys_own_accept_rule():
 
     passes = strategy.explain_passes(snapshot, decision)
 
-    assert passes == {
-        "greedy": "asks more than it gives",
-        "pay-in-food": "would pay with a resource we cannot produce",
-    }
+    assert passes == {"greedy": "price exceeds import stock tier"}
+    # The assignment policy permits affordable exchanges using imported goods.
+    assert any(isinstance(a, AcceptAction) and a.offer_id == "pay-in-food"
+               for a in decision.actions)
 
 
 def test_an_acceptable_offer_left_for_lack_of_command_budget_says_so():

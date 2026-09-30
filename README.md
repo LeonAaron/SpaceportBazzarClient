@@ -243,3 +243,18 @@ quitting suppliers and one requires every trade to be 1:1. These assertions rema
 visible. The earlier coverage and test-count figures above are historical, not
 validation of this combined version. The original commit is saved locally as
 `backup/assignment-before-hivemind`.
+
+## Follow a simulation live
+
+```sh
+.venv/bin/python -m bazaar_sim.orchestrate --live --planets 6 --ticks 120 --tick-ms 100 --out logs/live-demo
+```
+
+This opens a live fleet dashboard, with planet selection, decisions, pending
+offers and confirmed transfers. It stays open until Ctrl+C. Use a fresh output
+folder each time. To view an existing folder, run
+`.venv/bin/python -m bazaar_client.live_dashboard logs/demo-fixed --open`.
+Summaries are now Markdown (`P01-summary.md`), generated deterministically from
+the evidence logs. See [SIMULATOR.md](SIMULATOR.md#live-browser-dashboard) for
+latency details, configuration and the distinction between deterministic
+summaries and timing-dependent simulations.

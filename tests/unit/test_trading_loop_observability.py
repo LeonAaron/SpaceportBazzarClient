@@ -228,6 +228,6 @@ async def test_a_rejected_token_is_not_retried_and_is_recorded(monkeypatch, tmp_
 
 
 def test_the_exit_code_names_the_failure_category(monkeypatch):
-    monkeypatch.setattr("bazaar_client.cli.BazaarSession", RefusingSession)
+    monkeypatch.setattr("bazaar_client.app.BazaarSession", RefusingSession)
 
     assert main(["--token", "bad", "--mode", "check"]) == 3

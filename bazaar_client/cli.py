@@ -15,10 +15,13 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bazaar_client.app import CommandOutcome
-from bazaar_client.config import ClientConfig, MissingTokenError, config_from_args
+from bazaar_client.config import ClientConfig, ConfigurationError, config_from_args
 from bazaar_client.domain.types import Phase, Resource, Snapshot
 from bazaar_client.logging_setup import configure_logging
 from bazaar_client.hivemind import run_hivemind_mode
+from bazaar_client.diagnostics import FailureKind, diagnose
+from bazaar_client.status import ClientStatus
+from bazaar_client.version import build_id, describe_build
 
 logger = logging.getLogger("bazaar_client.cli")
 
@@ -173,6 +176,8 @@ async def run_check_mode(config: ClientConfig) -> int:
     rung of the status ladder is reported as it is reached, so a failure shows
     exactly how far the client got.
     """
+    from bazaar_client.app import BazaarSession
+
     logger.info("status %s: process running", ClientStatus.STARTING.value)
     async with BazaarSession(config) as session:
         logger.info("status %s: socket open to %s", ClientStatus.CONNECTED.value, config.ws_url)
@@ -199,7 +204,7 @@ async def run_check_mode(config: ClientConfig) -> int:
 
 
 def _write_run_reports(config: ClientConfig) -> None:
-    """Turn the evidence log just written into a text summary + HTML dashboard."""
+    """Turn the evidence log just written into a deterministic Markdown summary."""
     if config.evidence_file is None:
         return
     from bazaar_client.execution.reporting import load_analyzer

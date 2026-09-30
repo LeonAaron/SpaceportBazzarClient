@@ -314,15 +314,18 @@ def test_write_reports_returns_empty_for_a_missing_or_empty_log(tmp_path):
     assert analyze_evidence.write_reports(empty) == {}
 
 
-def test_write_reports_writes_a_summary_and_a_dashboard(tmp_path):
+def test_write_reports_writes_markdown_by_default(tmp_path):
     path = tmp_path / "P01-evidence.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
 
     written = analyze_evidence.write_reports(path)
 
-    assert written == {"summary": tmp_path / "P01-summary.txt", "dashboard": tmp_path / "P01-dashboard.html"}
-    assert "key findings:" in written["summary"].read_text(encoding="utf-8")
-    assert written["dashboard"].read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert written == {"summary": tmp_path / "P01-summary.md"}
+    assert "## Key findings" in written["summary"].read_text(encoding="utf-8")
+    assert not (tmp_path / "P01-dashboard.html").exists()
+    assert analyze_evidence.markdown_report(RECORDS) == analyze_evidence.markdown_report(RECORDS)
+    archive = analyze_evidence.write_reports(path, include_html=True)
+    assert archive["dashboard"].read_text().startswith("<!doctype html>")
 
 
 def test_the_report_runs_end_to_end_from_a_file(tmp_path, capsys):

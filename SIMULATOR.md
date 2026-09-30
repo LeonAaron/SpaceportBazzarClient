@@ -71,3 +71,68 @@ planets. `--production run2` instead replays the class run's 2/5/6 phases.
 
 Where the model and the class server disagree, the class run wins: check the
 evidence log and `scripts/analyze_run.py` against the Directorate's log.
+
+## Live browser dashboard
+
+From the project root on your host (with dependencies installed):
+
+```sh
+.venv/bin/python -m bazaar_sim.orchestrate --live --planets 6 --ticks 120 --tick-ms 100 --out logs/live-demo
+```
+
+The browser opens at `http://127.0.0.1:8766`. Choose a planet to see its current
+reason for acting, stock history, pending offers, and completed transfers.
+The page stays available after the run; Ctrl+C closes the dashboard. Use a fresh
+output directory for each run. `--dashboard-port 8767` selects another port.
+
+To watch a simulation already running, or inspect an existing run folder:
+
+```sh
+.venv/bin/python -m bazaar_client.live_dashboard logs/demo-fixed --open
+```
+
+This dashboard runs **on the host**, not inside the current Compose container.
+It can watch logs that a container writes into the shared project directory.
+It also works with trade-mode evidence folders, though those show only the
+stations whose logs are present. Hivemind bridges do not currently emit this
+evidence format. Terminal logs remain available for debugging.
+
+### Latency and load
+
+The dashboard is an independent, read-only process. It tails only new evidence
+bytes every 5 ms and pushes compact state over a local WebSocket at most once
+per 16 ms. Browsers paint on animation frames. These are scheduling targets,
+not real-time guarantees: OS load, log writing and browser rendering add delay.
+The page reports WebSocket delivery time separately from the age of its most
+recent update. A quiet or disconnected feed is not evidence of a paused game.
+
+A slow browser has only one pending state; newer states replace it rather than
+building a queue or blocking a trader. Histories are bounded to 120 ticks and
+recent offers/transfers are bounded. Every event still remains in the evidence
+log. The dashboard never sends game commands, so pausing its display does not
+pause the simulation. For standalone monitoring, `--poll-ms` and `--frame-ms`
+can adjust the latency/CPU tradeoff. Very fast ticks can be skipped visually.
+
+### Markdown summaries and determinism
+
+Each client now writes `P01-summary.md` (and equivalents) after the run.
+The summary uses fixed Python aggregations and templates: **identical log
+contents and formatter version produce identical Markdown**. No model or
+random generation is involved. The Markdown includes outcomes, inventories,
+findings, transfers and timing, and labels client observations as such.
+
+Live simulation results themselves can differ because independent client
+processes and messages are scheduled differently. The benchmark engine's
+seeded, in-process scenarios are the separate deterministic comparison tool.
+Archived HTML reports can still be requested explicitly with
+`scripts/analyze_evidence.py ... --html report.html`; they are no longer created
+automatically. Full log details remain available even when a live frame is skipped.
+
+Local validation of this dashboard: 50 append-to-WebSocket samples measured
+1.9 ms median, 6.7 ms p95 and 10.2 ms maximum. These exclude browser painting
+and are not performance guarantees. A six-planet, 20-tick run at 150 ms/tick
+finished with all clients exiting cleanly; Chromium checks covered selection,
+pause/resume, reconnecting, and mobile layout. A longer 50 ms/tick stress run
+updated the dashboard through the final server state but exposed trading-client
+shutdown/reconnect timeouts. Faster display delivery does not fix those client
+lifecycle issues or guarantee that the trading strategy survives a given run.

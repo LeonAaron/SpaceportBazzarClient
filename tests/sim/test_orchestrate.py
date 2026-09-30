@@ -49,4 +49,4 @@ def test_two_client_processes_trade_through_our_server_and_both_survive(tmp_path
     assert planets["P03"]["exported"] == {"water": 0, "food": 0, "components": 0}
     for sid in ("P01", "P02", "P03"):
         assert (tmp_path / f"{sid}-evidence.jsonl").stat().st_size > 0
-        assert (tmp_path / f"{sid}-dashboard.html").exists()
+        assert (tmp_path / f"{sid}-summary.md").exists()

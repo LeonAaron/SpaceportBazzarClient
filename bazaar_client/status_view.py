@@ -1,7 +1,7 @@
 """A human-readable panel of where our planet stands right now.
 
     P01 | tick 42/120 | RUNNING | participating | health 100 | strategy reserve-trader
-    reserves     water 55 (spendable 35)   food 40/60 target   components 22/60 target
+    reserves     water 55 (reserve 4, uncommitted 55, surplus 51)
     pending      offer 20 WATER for 20 FOOD to P03   | 1 command awaiting confirmation
     open offers  out offer-12 -> P03  pay 20 water  get 20 food   expires t45
                  in  offer-19 <- P05  pay 0         get 3 food    expires t44
@@ -56,15 +56,15 @@ def render_status(
         ) if p)
     ]
 
-    targets = decision.targets if decision is not None else Bundle.zero()
     reserves = []
     for resource in Resource:
         held = me.inventory.get(resource)
-        if resource == me.specialty:
-            spendable = f" (spendable {decision.spendable})" if decision is not None else ""
-            reserves.append(f"{resource.name.lower()} {held}{spendable}")
-        else:
-            reserves.append(f"{resource.name.lower()} {held}/{targets.get(resource)} target")
+        detail = ""
+        if decision is not None:
+            detail = (f" (reserve {decision.reserve.get(resource)}, "
+                      f"uncommitted {decision.available.get(resource)}, "
+                      f"surplus {decision.surplus.get(resource)})")
+        reserves.append(f"{resource.name.lower()} {held}{detail}")
     lines.append("reserves      " + "   ".join(reserves))
 
     actions = decision.actions if decision is not None else []

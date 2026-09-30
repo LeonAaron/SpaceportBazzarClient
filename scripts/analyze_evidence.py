@@ -631,12 +631,49 @@ def html_report(records: list[dict], title: str = "Run report") -> str:
     return HTML_TEMPLATE.replace("__TITLE__", html.escape(title)).replace("__DATA__", data)
 
 
-def write_reports(evidence_path: Path, *, out_dir: Path | None = None,
-                   title: str | None = None) -> dict[str, Path]:
-    """Write a text summary and an HTML dashboard for one evidence log.
+def markdown_report(records: list[dict], title: str = "Run summary") -> str:
+    """Pure formatting and aggregation: identical records yield identical text."""
+    def cell(value):
+        return str(value if value is not None else "Unknown").replace("|", "\\|").replace("\n", " ")
 
-    Returns {"summary": path, "dashboard": path}, or {} if the file is missing
-    or empty, so callers can call this unconditionally after a run.
+    o = overview(records)
+    lines = [f"# {cell(title)}", "", "Generated deterministically from the recorded evidence. No AI is used.", "",
+             "## Outcome", "", "| Measure | Observed value |", "| --- | --- |"]
+    for label, value in (("Last observed tick", o["last_tick"]), ("Last observed health", o["final_health"]),
+                         ("Completed trades", o["trades_completed"]), ("Commands confirmed", o["commands_ok"]),
+                         ("Commands rejected or unconfirmed", o["commands_rejected"]),
+                         ("Ticks with shortages", len(shortages(records)))):
+        lines.append(f"| {label} | {cell(value)} |")
+    lines += ["", "These are client observations, not a guarantee of the final game outcome.",
+              "", "## Last observed inventory", "", "| Resource | Units |", "| --- | ---: |"]
+    for resource in RESOURCES:
+        lines.append(f"| {resource.title()} | {cell((o['final_inventory'] or {}).get(resource))} |")
+    lines += ["", "## Key findings", ""]
+    findings = key_findings(records)
+    lines += [f"- {cell(_describe_finding(f))}" for f in findings] or ["No warning patterns were found in the recorded events."]
+    lines += ["", "## Completed transfers", "", "| Tick | Counterparty | Received | Paid |", "| ---: | --- | --- | --- |"]
+    def quantities(bundle):
+        return ", ".join(f"{bundle.get(r, 0)} {r}" for r in RESOURCES if bundle.get(r)) or "Nothing"
+    for trade in completed_trades(records):
+        lines.append(f"| {cell(trade.get('settled_tick'))} | {cell(trade.get('counterparty'))} | "
+                     f"{cell(quantities(trade.get('we_got') or {}))} | {cell(quantities(trade.get('we_paid') or {}))} |")
+    lines += ["", "## Timing", "", "| Stage | Median (ms) | 95th percentile (ms) |", "| --- | ---: | ---: |"]
+    for name, stats in responsiveness(records)["series"].items():
+        lines.append(f"| {cell(name)} | {stats['p50']} | {stats['p95']} |")
+    lines += ["", "## Run identity", ""]
+    header = run_header(records)
+    for field in ("station_id", "strategy", "build", "mode"):
+        if header.get(field) is not None:
+            lines.append(f"- **{field.replace('_', ' ').title()}:** {cell(header[field])}")
+    return "\n".join(lines) + "\n"
+
+
+def write_reports(evidence_path: Path, *, out_dir: Path | None = None,
+                   title: str | None = None, include_html: bool = False) -> dict[str, Path]:
+    """Write a Markdown summary and, optionally, an HTML archive for a log.
+
+    Returns a summary path and an optional dashboard path, or {} if the file
+    is missing or empty. Safe to call unconditionally after a run.
     """
     if not evidence_path.exists() or not evidence_path.stat().st_size:
         return {}
@@ -644,12 +681,14 @@ def write_reports(evidence_path: Path, *, out_dir: Path | None = None,
     out_dir = out_dir or evidence_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = evidence_path.stem.removesuffix("-evidence")
-    summary_path = out_dir / f"{stem}-summary.txt"
-    dashboard_path = out_dir / f"{stem}-dashboard.html"
-    summary_path.write_text(report(records), encoding="utf-8")
-    dashboard_path.write_text(html_report(records, title or f"Run report: {evidence_path.name}"),
-                               encoding="utf-8")
-    return {"summary": summary_path, "dashboard": dashboard_path}
+    summary_path = out_dir / f"{stem}-summary.md"
+    summary_path.write_text(markdown_report(records, title or f"{stem} run summary"), encoding="utf-8")
+    written = {"summary": summary_path}
+    if include_html:
+        dashboard_path = out_dir / f"{stem}-dashboard.html"
+        dashboard_path.write_text(html_report(records, title or f"Run report: {evidence_path.name}"), encoding="utf-8")
+        written["dashboard"] = dashboard_path
+    return written
 
 
 HTML_TEMPLATE = """<!doctype html>
