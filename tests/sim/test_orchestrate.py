@@ -50,3 +50,22 @@ def test_two_client_processes_trade_through_our_server_and_both_survive(tmp_path
     for sid in ("P01", "P02", "P03"):
         assert (tmp_path / f"{sid}-evidence.jsonl").stat().st_size > 0
         assert (tmp_path / f"{sid}-summary.md").exists()
+
+
+def test_hivemind_mode_coordinates_real_bridges_and_writes_live_evidence(tmp_path):
+    pytest.importorskip("spaceport_hivemind.client")
+    code = orchestrate.main([
+        "--mode", "hivemind", "--planets", "3", "--ticks", "12",
+        "--tick-ms", "150", "--starting-stock", "5", "--grace", "5", "--out", str(tmp_path),
+    ])
+    result = json.loads((tmp_path / "orchestration.json").read_text())
+    assert code == 0
+    assert result["mode"] == "hivemind"
+    assert set(result["client_exit_codes"].values()) == {0}
+    assert result["server_report"]["transactions"] > 0
+    assert result["server_report"]["score"]["survivors"] == 3
+    for sid in ("P01", "P02", "P03"):
+        records = [json.loads(line) for line in (tmp_path / f"{sid}-evidence.jsonl").read_text().splitlines()]
+        assert any(r.get("kind") == "decision" and r.get("new_transactions") for r in records)
+        assert any(r.get("action_kind") == "hivemind" for r in records)
+        assert (tmp_path / f"{sid}-summary.md").exists()

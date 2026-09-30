@@ -94,8 +94,8 @@ To watch a simulation already running, or inspect an existing run folder:
 This dashboard runs **on the host**, not inside the current Compose container.
 It can watch logs that a container writes into the shared project directory.
 It also works with trade-mode evidence folders, though those show only the
-stations whose logs are present. Hivemind bridges do not currently emit this
-evidence format. Terminal logs remain available for debugging.
+stations whose logs are present. Hivemind bridges emit this evidence format when given `--evidence-file`;
+`orchestrate --mode hivemind` configures that automatically. Terminal logs remain available for debugging.
 
 ### Latency and load
 
@@ -136,3 +136,18 @@ pause/resume, reconnecting, and mobile layout. A longer 50 ms/tick stress run
 updated the dashboard through the final server state but exposed trading-client
 shutdown/reconnect timeouts. Faster display delivery does not fix those client
 lifecycle issues or guarantee that the trading strategy survives a given run.
+
+## Run with the Hivemind coordinator
+
+Install the optional pinned checkout with
+`.venv/bin/python -m pip install -r requirements-hivemind.txt`, then run:
+
+```sh
+.venv/bin/python -m bazaar_sim.orchestrate --mode hivemind --live --planets 6 --ticks 120 --tick-ms 300
+```
+
+This starts our simulator plus upstream's coordinator on separate local ports.
+Clients use `--mode hivemind`, forward their observations, and execute the central
+commands. Evidence for the live dashboard and Markdown summaries is written to
+the normal run folder. The coordinator is stopped with the clients at the end.
+No private hosted-service key is needed for this isolated local run.

@@ -181,7 +181,7 @@ client:
 ```sh
 git submodule update --init --recursive
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements-dev.txt -e ./spaceport_hivemind
+.venv/bin/python -m pip install -r requirements-dev.txt -r requirements-hivemind.txt
 ```
 
 In separate terminals, start the demo game and coordinator:
@@ -205,15 +205,18 @@ BAZAAR_HIVEMIND_KEY=local-hive-key .venv/bin/python -m bazaar_client.cli \
 ```
 
 `--hivemind-endpoint` also accepts `BAZAAR_HIVEMIND_ENDPOINT`;
-`--hivemind-key` overrides `BAZAAR_HIVEMIND_KEY`. Existing game-token flags,
+`--hivemind-key` overrides `BAZAAR_HIVEMIND_KEY`, which overrides the top-level
+`hivemind_key` in the selected credentials JSON. Existing game-token flags,
 environment variables, and credentials files work in this mode. The game token
 stays at the bridge; the coordinator receives its separate shared key. Both
 secrets are redacted by this client's logging setup.
 
 Hivemind mode delegates to upstream `HivemindClient`, using its binary Bazaar
 connection and JSON coordinator protocol. The local trading policy, autonomous
-reconnect supervisor, evidence log, and `--max-decisions` do not run in this
-mode. A connection failure exits through the CLI error handler. The default
+reconnect supervisor, and `--max-decisions` do not run in this mode. Supplying
+`--evidence-file` records observations, coordinator commands and game results
+for our live dashboard and Markdown summaries. A connection failure exits through
+the CLI error handler. The default
 `--mode trade` still runs the assignment policy. Run only one client per station.
 For Docker, install the optional package inside the running container with
 `docker compose exec bazaar pip install -e /workspace/spaceport_hivemind` and use
@@ -258,3 +261,35 @@ Summaries are now Markdown (`P01-summary.md`), generated deterministically from
 the evidence logs. See [SIMULATOR.md](SIMULATOR.md#live-browser-dashboard) for
 latency details, configuration and the distinction between deterministic
 summaries and timing-dependent simulations.
+
+### Updated Hivemind simulation mode
+
+The submodule is updated to upstream `e5a5c02`. To launch our game server,
+the Hivemind coordinator, one bridge per planet, and the live dashboard:
+
+```sh
+.venv/bin/python -m bazaar_sim.orchestrate --mode hivemind --live --planets 6 --ticks 120 --tick-ms 300
+```
+
+Local endpoints and game credentials are assigned automatically. Local Hivemind
+listens only on loopback and uses no shared key. All decisions come from upstream's
+coordinator. The launcher stops the bridge processes and coordinator when the game
+ends; the live page stays open until Ctrl+C. Ordinary `--mode trade` is unchanged.
+Use `--evidence-file` with a standalone bridge to include it in the local live view.
+The displayed reserve is unknown in bridge logs because it is owned by the coordinator.
+
+For the hosted services named in upstream's [Getting started](spaceport_hivemind/GETTING_STARTED.md):
+
+```sh
+.venv/bin/python -m bazaar_client.cli --mode hivemind \
+  --station-id P01 --credentials-file ./my-credentials.json \
+  --ws-url wss://bazaar-game-kamalv.apps.cloudapps.unc.edu/ws \
+  --hivemind-endpoint wss://hivemind-kamalv.apps.cloudapps.unc.edu
+```
+
+Use your assigned station and private file containing `players` and optionally
+`hivemind_key`. No real credentials are included here. For the teacher's server,
+keep your teacher-issued endpoint and game token. No hosted connection is made
+by the local simulator. Hosted bridges remain connected across run resets;
+`--hivemind-exit-on-finish` opts into exiting after FINISHED/ABORTED and is set
+automatically by the local simulation launcher.

@@ -89,7 +89,16 @@ def _summaries(out: Path, stations: list[str]) -> dict[str, str]:
 
 
 async def orchestrate(args: argparse.Namespace) -> dict:
-    strategies = assign_strategies(args.strategies, args.planets)
+    mode = getattr(args, "mode", "trade")
+    if mode == "hivemind":
+        import importlib.util
+        try:
+            installed = importlib.util.find_spec("spaceport_hivemind.client") is not None
+        except ModuleNotFoundError:
+            installed = False
+        if not installed:
+            raise ValueError("install Hivemind first: python -m pip install -r requirements-hivemind.txt")
+    strategies = ["hivemind"] * args.planets if mode == "hivemind" else assign_strategies(args.strategies, args.planets)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = args.out or REPO_ROOT / "logs" / "sim" / stamp
     out.mkdir(parents=True, exist_ok=True)
@@ -112,17 +121,49 @@ async def orchestrate(args: argparse.Namespace) -> dict:
         server = await asyncio.create_subprocess_exec(
             *server_cmd, stdout=server_log, stderr=asyncio.subprocess.STDOUT, env=env, cwd=REPO_ROOT)
     clients: dict[str, asyncio.subprocess.Process] = {}
+    coordinator = None
+    hive_url = None
     try:
+        if mode == "hivemind":
+            hive_port = free_port()
+            hive_url = f"ws://127.0.0.1:{hive_port}"
+            with open(out / "hivemind-server.log", "w", encoding="utf-8") as hive_log:
+                coordinator = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c", "from spaceport_hivemind.server import main; main()",
+                    "--host", "127.0.0.1", "--port", str(hive_port),
+                    "--station-count", str(args.planets),
+                    stdout=hive_log, stderr=asyncio.subprocess.STDOUT, env=env, cwd=REPO_ROOT)
+            deadline = asyncio.get_running_loop().time() + 10
+            while True:
+                if coordinator.returncode is not None:
+                    raise RuntimeError("Hivemind server failed; see hivemind-server.log")
+                try:
+                    reader, writer = await asyncio.open_connection("127.0.0.1", hive_port)
+                    writer.write(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{hive_port}\r\nConnection: close\r\n\r\n".encode())
+                    await writer.drain()
+                    await asyncio.wait_for(reader.read(), 2)
+                    writer.close()
+                    await writer.wait_closed()
+                    break
+                except OSError:
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise TimeoutError("Hivemind server did not start")
+                    await asyncio.sleep(.05)
+            print(f"Hivemind coordinator on {hive_url}", flush=True)
         await _wait_for_file(credentials, server, timeout=20)
         print(f"server on {url}; output in {out}", flush=True)
         for i, strategy in enumerate(strategies):
             sid = f"P{i + 1:02}"
             cmd = [
-                sys.executable, "-m", "bazaar_client.cli", "--mode", "trade", "--ws-url", url,
+                sys.executable, "-m", "bazaar_client.cli", "--mode", mode, "--ws-url", url,
                 "--credentials-file", str(credentials), "--station-id", sid,
-                "--strategy", strategy, "--evidence-file", str(out / f"{sid}-evidence.jsonl"),
+                "--evidence-file", str(out / f"{sid}-evidence.jsonl"),
                 "--status-every", "0", "--log-level", args.client_log_level,
             ]
+            if mode == "hivemind":
+                cmd += ["--hivemind-endpoint", hive_url, "--hivemind-exit-on-finish"]
+            else:
+                cmd += ["--strategy", strategy]
             with open(out / f"{sid}-client.log", "w", encoding="utf-8") as log:
                 clients[sid] = await asyncio.create_subprocess_exec(
                     *cmd, stdout=log, stderr=asyncio.subprocess.STDOUT, env=env, cwd=REPO_ROOT)
@@ -141,11 +182,15 @@ async def orchestrate(args: argparse.Namespace) -> dict:
         for process in clients.values():
             await _terminate(process)
         await _terminate(server)
+        if coordinator is not None:
+            await _terminate(coordinator)
 
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else None
     summary = {
         "out": str(out),
         "url": url,
+        "mode": mode,
+        "hivemind_url": hive_url,
         "strategies": dict(zip((f"P{i + 1:02}" for i in range(args.planets)), strategies)),
         "client_exit_codes": exit_codes,
         "server_report": report,
@@ -179,6 +224,8 @@ def print_summary(summary: dict) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bazaar-orchestrate", description=__doc__.splitlines()[0])
+    parser.add_argument("--mode", choices=("trade", "hivemind"), default="trade",
+                        help="local policy or a shared Hivemind coordinator")
     parser.add_argument("--planets", type=int, default=3)
     parser.add_argument("--strategies", default="reserve-trader",
                         help='one name for every planet, or "reserve-trader:2,passive:1"')

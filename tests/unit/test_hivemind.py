@@ -46,3 +46,32 @@ async def test_bridge_receives_selected_station_and_separate_credentials(monkeyp
     )
     assert (hive.endpoint, hive.shared_key) == (config.hivemind_endpoint, "hive-key")
     Bridge.run.assert_awaited_once()
+
+
+def test_hive_key_from_credentials_with_explicit_overrides(tmp_path, monkeypatch):
+    import json
+    path = tmp_path / "private.json"
+    path.write_text(json.dumps({"hivemind_key": "file-key", "players": [
+        {"station_id": "P03", "token": "game-token"}]}))
+    monkeypatch.delenv("BAZAAR_HIVEMIND_KEY", raising=False)
+    args = ["--mode", "hivemind", "--station-id", "P03", "--credentials-file", str(path)]
+    config = config_from_args(args)
+    assert config.hivemind_key.reveal() == "file-key"
+    assert config.token.reveal() == "game-token"
+    assert "file-key" not in repr(config)
+    monkeypatch.setenv("BAZAAR_HIVEMIND_KEY", "env-key")
+    assert config_from_args(args).hivemind_key.reveal() == "env-key"
+    assert config_from_args(args + ["--hivemind-key", "flag-key"]).hivemind_key.reveal() == "flag-key"
+    assert not config.hivemind_exit_on_finish
+    assert config_from_args(args + ["--hivemind-exit-on-finish"]).hivemind_exit_on_finish
+
+
+@pytest.mark.parametrize("key", ["", "  ", 123, [], {}])
+def test_invalid_hive_key_is_a_configuration_error(tmp_path, monkeypatch, key):
+    import json
+    from bazaar_client.config import ConfigurationError
+    monkeypatch.delenv("BAZAAR_HIVEMIND_KEY", raising=False)
+    path = tmp_path / "private.json"
+    path.write_text(json.dumps({"hivemind_key": key}))
+    with pytest.raises(ConfigurationError, match="nonempty string"):
+        config_from_args(["--mode", "hivemind", "--token", "t", "--credentials-file", str(path)])

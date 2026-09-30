@@ -19,7 +19,6 @@ from bazaar_client.config import ClientConfig, ConfigurationError, config_from_a
 from bazaar_client.domain.types import Phase, Resource, Snapshot
 from bazaar_client.logging_setup import configure_logging
 from bazaar_client.hivemind import run_hivemind_mode
-from bazaar_client.diagnostics import FailureKind, diagnose
 from bazaar_client.status import ClientStatus
 from bazaar_client.version import build_id, describe_build
 
@@ -250,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         config = config_from_args(arguments)
     except ConfigurationError as exc:
         # Before logging is configured, so write plainly rather than traceback.
+        from bazaar_client.diagnostics import diagnose
+
         diagnosis = diagnose(exc)
         print(f"configuration error: {exc}\n  hint: {diagnosis.hint}", file=sys.stderr)
         return diagnosis.exit_code
@@ -270,6 +271,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
+        if config.mode == "hivemind":
+            # Upstream uses a distinct bazaar.proto descriptor. Do not import
+            # our wire diagnostics (and bindings) into the bridge process.
+            logger.error("hivemind client failed: %s", exc)
+            return 1
+        from bazaar_client.diagnostics import FailureKind, diagnose
+
         diagnosis = diagnose(exc)
         logger.error("client failed %s", diagnosis)
         if diagnosis.kind is FailureKind.APPLICATION:

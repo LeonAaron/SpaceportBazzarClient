@@ -75,6 +75,7 @@ class ClientConfig:
     status_file: Path | None = None
     hivemind_endpoint: str = "ws://127.0.0.1:8765"
     hivemind_key: Secret | None = None
+    hivemind_exit_on_finish: bool = False
 
 
 def read_token_from_credentials(path: Path, station_id: str) -> str:
@@ -196,6 +197,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BAZAAR_HIVEMIND_KEY"),
         help="Hivemind shared key (env: BAZAAR_HIVEMIND_KEY)",
     )
+    parser.add_argument("--hivemind-exit-on-finish", action="store_true",
+                        help="exit a bridge after FINISHED/ABORTED (local simulations)")
     parser.add_argument("--strategy", default=os.environ.get("BAZAAR_STRATEGY", "reserve-trader"))
     parser.add_argument("--status-every", type=int, default=os.environ.get("BAZAAR_STATUS_EVERY", "10"))
     parser.add_argument("--status-file", type=Path, default=os.environ.get("BAZAAR_STATUS_FILE"))
@@ -216,6 +219,15 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
     if evidence_file is None and not args.no_evidence and args.mode in ("trade", "walkthrough"):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         evidence_file = Path("logs") / "live" / stamp / f"{args.mode}-{args.station_id}-evidence.jsonl"
+    hive_key = args.hivemind_key
+    if args.mode == "hivemind" and hive_key is None and args.credentials_file.exists():
+        try:
+            document = json.loads(args.credentials_file.read_text())
+            hive_key = document.get("hivemind_key")
+        except (OSError, ValueError, AttributeError) as exc:
+            raise ConfigurationError("unable to read hivemind credentials JSON object") from exc
+    if hive_key is not None and (not isinstance(hive_key, str) or not hive_key.strip()):
+        raise ConfigurationError("hivemind_key must be a nonempty string")
     return ClientConfig(
         ws_url=args.ws_url,
         token=resolve_token(args.token, args.station_id, args.credentials_file),
@@ -229,5 +241,6 @@ def config_from_args(argv: list[str] | None = None) -> ClientConfig:
         evidence_file=evidence_file,
         max_decisions=args.max_decisions,
         hivemind_endpoint=args.hivemind_endpoint,
-        hivemind_key=Secret(args.hivemind_key) if args.hivemind_key else None,
+        hivemind_key=Secret(hive_key) if hive_key else None,
+        hivemind_exit_on_finish=args.hivemind_exit_on_finish,
     )
