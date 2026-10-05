@@ -29,6 +29,11 @@ DONATION_CAP_FRACTION = 0.2
 COOLDOWN_TICKS = 5
 MAX_GIFTS_PER_TICK = 1
 
+# Stock over the cap goes to whoever is asking for it, in lots small enough to
+# spread across several planets, rotating so one seeker does not take it all.
+MAX_EXCESS_GIFT = 20
+EXCESS_COOLDOWN_TICKS = 2
+
 
 @dataclass(frozen=True, slots=True)
 class GiftIntent:
@@ -40,6 +45,21 @@ class GiftIntent:
 def donation_size(surplus_qty: int) -> int:
     """A bounded fraction of idle surplus, and at least one unit to be useful."""
     return max(1, int(surplus_qty * DONATION_CAP_FRACTION))
+
+
+def pick_gift_recipient(
+    model: CounterpartyModel, resource: Resource, tick: int, memory: PolicyMemory,
+) -> str | None:
+    """The planet advertising for `resource` the longest, or None if nobody is."""
+    seekers = [
+        stats for stats in model.stations()
+        if resource in stats.seeking
+        and memory.ticks_since_gift(stats.station_id, resource, tick) >= EXCESS_COOLDOWN_TICKS
+    ]
+    if not seekers:
+        return None
+    best = max(seekers, key=lambda s: (s.seeking_streak.get(resource, 0), s.last_ad_tick))
+    return best.station_id
 
 
 def scan_for_distress(

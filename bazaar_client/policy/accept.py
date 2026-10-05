@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from bazaar_client.domain.types import Bundle, Offer, Resource
-from bazaar_client.policy.reserves import Urgency, comfortably_supplied
-from bazaar_client.policy.pricing import premium_for
+from bazaar_client.policy.reserves import Urgency, comfortably_supplied, over_ceiling
+from bazaar_client.policy.pricing import END_GAME_RATIO, premium_for
 
 # A trade can look slightly lossy in raw units and still be worth taking when it
 # brings in something we actually need.
@@ -54,19 +54,26 @@ def evaluate_incoming(
     *,
     specialty: Resource | None = None,
     max_payment_ratio: float | None = None,
+    end_game: bool = False,
 ) -> AcceptDecision:
     cost = offer.what_station_pays(station_id)
     gain = offer.what_station_receives(station_id)
+    pays_with_specialty = specialty is not None and cost.total() == cost.get(specialty)
 
     if specialty is not None and comfortably_supplied(available):
         if gain.get(specialty) > 0:
             return AcceptDecision(False, "well supplied: do not import our production")
-        if gain.total() <= cost.total():
+        if gain.total() <= cost.total() and not (end_game and pays_with_specialty):
             return AcceptDecision(False, "well supplied: require a net resource gain")
 
     if cost.is_zero():
         # A gift: it can only help, and the protocol still requires an accept.
         return AcceptDecision(True, "gift")
+
+    if specialty is not None:
+        imported = [r for r in Resource if r != specialty and gain.get(r) > 0]
+        if imported and all(over_ceiling(r, available, specialty) for r in imported):
+            return AcceptDecision(False, "already well ahead on this import; buy the other first")
 
     if not available.dominates(cost):
         # Accepting would fail on insufficient resources and settle nothing.
@@ -84,10 +91,11 @@ def evaluate_incoming(
             return AcceptDecision(False, "would breach reserve")
         return AcceptDecision(True, "favourable trade within production supply guard")
 
-    if specialty is not None and cost.total() == cost.get(specialty):
+    if pays_with_specialty:
         # Renewable production buys imports continuously, even at healthy stock.
         # Price imported goods by their own stock tier, not the specialty's.
-        value = sum(gain.get(r) * premium_for(urgency[r], available.get(r))
+        floor_ratio = END_GAME_RATIO if end_game else 0.0
+        value = sum(gain.get(r) * max(floor_ratio, premium_for(urgency[r], available.get(r)))
                     for r in Resource if r != specialty)
         net_cost = max(0, cost.get(specialty) - gain.get(specialty))
         if available.get(specialty) - net_cost < reserve.get(specialty):

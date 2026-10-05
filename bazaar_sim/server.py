@@ -429,6 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="balanced: output exactly covers world upkeep; run2: 2/5/6 phases")
     parser.add_argument("--variation", type=int, default=0,
                         help="balanced only: +/- swing per 12-tick phase, zero on average")
+    parser.add_argument("--surplus", type=float, default=0.0,
+                        help="balanced only: output above world upkeep, e.g. 0.25 for 25%%")
     parser.add_argument("--start-when", type=int, default=None,
                         help="start once this many planets are ready (default: all)")
     parser.add_argument("--open-auth", action="store_true",
@@ -444,7 +446,8 @@ async def serve_run(args: argparse.Namespace) -> dict:
     rules = replace(DEFAULT_RULES, duration_ticks=args.ticks, tick_duration_ms=args.tick_ms)
     economy = build_economy(args.planets, rules=rules, starting_stock=args.starting_stock,
                             run_id=args.run_id)
-    production = (balanced_production(args.planets, variation=args.variation)
+    production = (balanced_production(args.planets, variation=args.variation,
+                                      surplus=args.surplus)
                   if args.production == "balanced" else run_two_production())
     server = BazaarServer(economy, open_auth=args.open_auth, tick_ms=args.tick_ms,
                           start_when=args.start_when, production=production,

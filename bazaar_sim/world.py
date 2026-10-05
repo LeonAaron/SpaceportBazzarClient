@@ -42,7 +42,9 @@ def specialty_of(index: int) -> Resource:
     return list(Resource)[index % 3]
 
 
-def balanced_production(planets: int, upkeep: int = 1, variation: int = 0) -> Production:
+def balanced_production(
+    planets: int, upkeep: int = 1, variation: int = 0, surplus: float = 0.0
+) -> Production:
     """Production that exactly covers the world's consumption of every resource.
 
     Each resource is consumed `planets * upkeep` times a tick and made only by
@@ -50,6 +52,9 @@ def balanced_production(planets: int, upkeep: int = 1, variation: int = 0) -> Pr
     `variation` swings each producer by +/- that many units in staggered
     12-tick phases whose average is zero, so the balance holds over each
     complete 36-tick cycle rather than every single tick.
+
+    `surplus` scales output above consumption (0.25 = 25% more than the world
+    uses). Fractions are carried across ticks, so the long-run rate is exact.
     """
     if planets < 3:
         raise ValueError("a balanced world needs at least 3 planets, one per resource")
@@ -60,7 +65,12 @@ def balanced_production(planets: int, upkeep: int = 1, variation: int = 0) -> Pr
         for rank, i in enumerate(producers):
             base[i] = share + (1 if rank < extra else 0)
     swing = (-variation, 0, variation)
-    return lambda tick, i: max(0, base[i] + swing[(tick // PHASE_TICKS + i) % 3])
+
+    def produce(tick: int, i: int) -> int:
+        bonus = int((tick + 1) * base[i] * surplus) - int(tick * base[i] * surplus)
+        return max(0, base[i] + bonus + swing[(tick // PHASE_TICKS + i) % 3])
+
+    return produce
 
 
 @dataclass

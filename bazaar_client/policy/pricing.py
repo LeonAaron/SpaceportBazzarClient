@@ -18,6 +18,12 @@ MAX_PREMIUM_RATIO = 8.0
 
 # Small trades limit exposure; the 1.2 tier uses five to express six-for-five.
 MAX_TRADE_SIZE = 4
+# Only one command fits in a tick, so a pile of idle production should move in
+# bigger lots. One unit of size per this much spare specialty above its floor.
+MAX_BULK_TRADE_SIZE = 12
+SPARE_PER_BULK_UNIT = 4
+# Leftover production is worthless at the end; pay up to this to convert it.
+END_GAME_RATIO = 2.0
 
 
 class CannotAfford(ValueError):
@@ -40,9 +46,20 @@ def premium_for(urgency: Urgency, stock: int | None = None) -> float:
     return min(2.5 * 1.25 ** (7 - max(0, stock)), MAX_PREMIUM_RATIO)
 
 
-def desired_quantity(deficit: int, stock: int | None = None) -> int:
-    """Ask for enough to clear the shortfall, capped to keep trades small."""
+def trade_size(spare_specialty: int) -> int:
+    """Largest lot worth asking for, given specialty stock above its floor."""
+    return max(MAX_TRADE_SIZE, min(MAX_BULK_TRADE_SIZE, spare_specialty // SPARE_PER_BULK_UNIT))
+
+
+def desired_quantity(deficit: int, stock: int | None = None, size: int = MAX_TRADE_SIZE) -> int:
+    """Ask for enough to clear the shortfall, capped to keep trades small.
+
+    Bulk lots (`size`) apply only at parity stock; premium tiers keep the small
+    quantities that express their ratios exactly.
+    """
     cap = 5 if stock is not None and 15 <= stock < 20 else MAX_TRADE_SIZE
+    if stock is None or stock >= 20:
+        cap = max(cap, size)
     return max(1, min(deficit, cap))
 
 
@@ -62,6 +79,7 @@ def compute_terms(
     *,
     max_payment_ratio: float | None = None,
     stock: int | None = None,
+    end_game: bool = False,
 ) -> tuple[Bundle, Bundle]:
     """Returns (give, receive) from our perspective as the proposer."""
     if want == give_resource:
@@ -78,6 +96,12 @@ def compute_terms(
         give_qty = min(affordable, math.floor(want_qty * max_payment_ratio))
         if give_qty <= 0:
             raise CannotAfford("production supply guard prevents paid trade")
+        return Bundle.single(give_resource, give_qty), Bundle.single(want, want_qty)
+
+    if end_game:
+        # Overpay so the offer clears first; what we pay with is spare anyway.
+        want_qty = max(1, min(want_qty, math.floor(affordable / END_GAME_RATIO)))
+        give_qty = min(affordable, math.ceil(want_qty * END_GAME_RATIO))
         return Bundle.single(give_resource, give_qty), Bundle.single(want, want_qty)
 
     give_qty = priced_give_quantity(want_qty, urgency, stock)

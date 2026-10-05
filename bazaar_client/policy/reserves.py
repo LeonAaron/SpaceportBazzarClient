@@ -31,6 +31,18 @@ PRODUCTION_STOP_TICKS = 10
 STORAGE_THRESHOLD = 32
 MAX_RESERVE_UNITS = 15
 
+# Imports are only useful in balance: health falls when any one runs out, so
+# piling up one while the other drains buys nothing. An import may lead the
+# other by this much before we stop buying more of it.
+BALANCE_GAP = 10
+IMPORT_CEILING_FLOOR = 2 * WATCH_STOCK
+# Unspent production is worth nothing once the run ends, so in the last ticks
+# the specialty only needs to cover the upkeep that remains.
+END_GAME_TICKS = 10
+# Stock past this is hoarding: every planet consumes the same upkeep, so units
+# beyond it help us far less than they would help a planet that is asking.
+STOCK_CAP = 100
+
 
 class Urgency(enum.IntEnum):
     NONE = 0
@@ -106,15 +118,58 @@ def deficit_below_reserve(available: Bundle, reserve: Bundle) -> Bundle:
     return reserve.saturating_sub(available)
 
 
-def production_payment_limit(available: Bundle, station: StationObservation) -> float | None:
+def in_end_game(ticks_left: int | None) -> bool:
+    return ticks_left is not None and ticks_left <= END_GAME_TICKS
+
+
+def specialty_floor(station: StationObservation, ticks_left: int | None = None) -> int:
+    """Specialty stock to keep back: the normal floor, or what upkeep remains."""
+    upkeep = station.upkeep_per_tick.get(station.specialty)
+    if in_end_game(ticks_left):
+        return min(PRODUCTION_NORMAL_TICKS, ticks_left + 1) * upkeep
+    return PRODUCTION_NORMAL_TICKS * upkeep
+
+
+def production_payment_limit(
+    available: Bundle, station: StationObservation, ticks_left: int | None = None
+) -> float | None:
     """Cap payments by uncommitted ticks of our produced resource's upkeep."""
     upkeep = station.upkeep_per_tick.get(station.specialty)
     stock = available.get(station.specialty)
+    if in_end_game(ticks_left):
+        return 0.0 if stock < specialty_floor(station, ticks_left) else None
     if stock < PRODUCTION_STOP_TICKS * upkeep:
         return 0.0
     if stock < PRODUCTION_NORMAL_TICKS * upkeep:
         return 0.5
     return None
+
+
+def imports(specialty: Resource | None) -> list[Resource]:
+    return [r for r in Resource if r != specialty]
+
+
+def import_ceiling(resource: Resource, available: Bundle, specialty: Resource | None) -> int | None:
+    """Most of an import worth holding: a little ahead of the scarcest other import."""
+    others = [available.get(r) for r in imports(specialty) if r != resource]
+    if resource == specialty or not others:
+        return None
+    return max(IMPORT_CEILING_FLOOR, min(others) + BALANCE_GAP)
+
+
+def over_ceiling(resource: Resource, available: Bundle, specialty: Resource | None) -> bool:
+    ceiling = import_ceiling(resource, available, specialty)
+    return ceiling is not None and available.get(resource) > ceiling
+
+
+def scarcest_import(available: Bundle, specialty: Resource | None) -> Resource | None:
+    candidates = imports(specialty)
+    return min(candidates, key=lambda r: (available.get(r), r)) if candidates else None
+
+
+def excess_over_cap(available: Bundle) -> Bundle:
+    """Uncommitted stock above STOCK_CAP, which we give away rather than hold."""
+    return Bundle(*(max(0, available.get(r) - STOCK_CAP) for r in Resource))
 
 
 def comfortably_supplied(available: Bundle) -> bool:
