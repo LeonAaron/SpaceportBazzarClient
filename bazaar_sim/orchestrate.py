@@ -114,6 +114,7 @@ async def orchestrate(args: argparse.Namespace) -> dict:
         sys.executable, "-m", "bazaar_sim.server", "--port", str(port),
         "--planets", str(args.planets), "--ticks", str(args.ticks), "--tick-ms", str(args.tick_ms),
         "--production", args.production, "--variation", str(args.variation),
+        "--surplus", str(args.surplus),
         "--starting-stock", str(args.starting_stock),
         "--credentials-file", str(credentials), "--report", str(report_path),
     ]
@@ -233,6 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tick-ms", type=int, default=300)
     parser.add_argument("--production", choices=("balanced", "run2"), default="balanced")
     parser.add_argument("--variation", type=int, default=0)
+    parser.add_argument("--surplus", type=float, default=0.0)
     parser.add_argument("--starting-stock", type=int, default=30)
     parser.add_argument("--port", type=int, default=0, help="0 picks a free port")
     parser.add_argument("--grace", type=float, default=60.0,
